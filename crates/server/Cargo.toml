@@ -1,0 +1,11 @@
+[package]
+name = "behead"
+description = "android auto server for linux hosts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+aap = { path = "../aap" }
+libc = "0.2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

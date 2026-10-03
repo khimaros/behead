@@ -1,0 +1,3 @@
+# directories raspi-provision keeps on the persist partition, beside /home:
+# the home sessions give their applications (BEHEAD_HOME in behead.service)
+/var/lib/behead

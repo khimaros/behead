@@ -1,0 +1,14 @@
+# packages phosh.sh needs
+phosh
+phoc
+gnome-settings-daemon-common
+# gsettings, to follow the car's night mode
+libglib2.0-bin
+# the car's location for applications, set up by geoclue.conf
+geoclue-2.0
+wf-recorder
+# the gpu's drivers, for BEHEAD_RENDERER=gles2
+libgl1-mesa-dri
+# the session's sound server, and arecord, for audio.sh
+pulseaudio
+alsa-utils

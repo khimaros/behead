@@ -1,0 +1,6 @@
+# packages kodi.sh needs on top of the kiosk's
+kodi
+# for kodi-library.py
+python3
+# arecord, for audio.sh
+alsa-utils

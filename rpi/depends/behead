@@ -1,0 +1,4 @@
+# packages the behead service needs, one per line; # starts a comment.
+
+# encoder for the default video command
+ffmpeg

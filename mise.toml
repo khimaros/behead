@@ -1,0 +1,5 @@
+# pinned toolchain. exact versions only, so builds are reproducible.
+[tools]
+rust = "1.97.0"
+python = "3.14.7"
+uv = "0.11.25"

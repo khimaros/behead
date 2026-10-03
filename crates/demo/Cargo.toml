@@ -1,0 +1,9 @@
+[package]
+name = "behead-demo"
+description = "interactive demo video source for the behead server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+libc = "0.2"

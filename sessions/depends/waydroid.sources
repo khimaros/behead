@@ -1,0 +1,7 @@
+# debian stable has no waydroid package; its backports do. apt takes from
+# here only what stable lacks
+Types: deb
+URIs: http://deb.debian.org/debian/
+Suites: trixie-backports
+Components: main
+Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp

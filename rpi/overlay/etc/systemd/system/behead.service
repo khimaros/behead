@@ -1,0 +1,32 @@
+[Unit]
+Description=android auto server
+# overlay-firstboot binds the persisted directories on the first boot
+After=sys-kernel-config.mount overlay-firstboot.service
+
+[Service]
+EnvironmentFile=/etc/behead/behead.env
+# written by `make rpi-image SESSION=...`: the session to show in place of
+# the default video command
+EnvironmentFile=-/etc/behead/session.env
+# the home sessions give their applications, which /etc/persist.d/behead
+# keeps across reboots on the read-only root, and where the user copies
+# videos and music for the kodi session
+Environment=BEHEAD_HOME=/var/lib/behead
+Environment=BEHEAD_MEDIA=/home/behead/media
+# the base image hands the only usb controller to g_ether for ssh over usb.
+# take it while the service runs and give it back when it stops, so stopping
+# the service restores usb ssh.
+ExecStartPre=-/usr/sbin/modprobe -r g_ether
+ExecStartPre=-/usr/sbin/modprobe uinput
+# /run/behead, for the socket geoclue reads the car's location from
+RuntimeDirectory=behead
+# AUDIO_CMD and AUDIO_DELAY are empty, which the server takes for none,
+# unless the session has sound
+ExecStart=/usr/local/bin/behead --usb auto --cert-dir /etc/behead/certs --uinput --nmea-socket /run/behead/nmea.sock --audio-cmd ${AUDIO_CMD} --audio-delay ${AUDIO_DELAY} --video-cmd ${VIDEO_CMD}
+ExecStopPost=/usr/local/bin/behead teardown
+ExecStopPost=-/usr/sbin/modprobe g_ether
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

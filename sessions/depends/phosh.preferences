@@ -1,0 +1,7 @@
+Explanation: raspberry pi os builds a wlroots of its own, and debian's phoc,
+Explanation: built for debian's, stops at startup with "stack smashing
+Explanation: detected" on it. take wlroots from debian, and sway with it, so a
+Explanation: kiosk installed beside phosh gets the wlroots it was built for too
+Package: libwlroots-* sway
+Pin: origin deb.debian.org
+Pin-Priority: 1001

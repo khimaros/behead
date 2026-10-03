@@ -1,0 +1,3 @@
+# packages waydroid.sh needs on top of the kiosk's
+waydroid
+lxc

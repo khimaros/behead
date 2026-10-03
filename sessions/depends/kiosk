@@ -1,0 +1,4 @@
+# packages kiosk.sh needs, and with it every session that runs in the kiosk
+sway
+wf-recorder
+libgl1-mesa-dri

@@ -1,0 +1,14 @@
+# test vm for the usb gadget path. the repo is shared at /incant, so the
+# binary built on the host runs inside: the image tracks the host release
+# to keep glibc compatible.
+instances:
+  behead-test:
+    image: images:debian/14
+    vm: true
+    # sized for desktop sessions and waydroid, all rendered on the cpu
+    type: c4-m8
+    devices:
+      root:
+        size: 30GiB
+    provision:
+      - tests/vm/provision.sh

@@ -1,0 +1,7 @@
+# lets the logged-in user play the headunit against a device on a cable,
+# without root. install on the laptop:
+#   sudo cp tests/rpi/70-behead.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload
+# the gadget before the accessory switch, and the accessory after it
+SUBSYSTEM=="usb", ATTR{idVendor}=="12d1", ATTR{idProduct}=="107e", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="18d1", ATTR{idProduct}=="2d00", TAG+="uaccess"

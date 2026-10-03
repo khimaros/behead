@@ -1,0 +1,42 @@
+# openauto, an independent headunit implementation, as a test fixture. based
+# on the recipe in AACS (vm/Containerfile.openauto). libaasdk comes from
+# apt.opencardev.org; openauto itself from its github release.
+# xvfb gives it a display, xdotool clicks on it, ffmpeg grabs screenshots.
+FROM debian:trixie-slim
+
+ARG OA_TAG=2026.02.09+git.4cc739b
+ARG OA_VER=2026.02.09
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && \
+    apt-get -yq install --no-install-recommends ca-certificates curl gnupg lsb-release && \
+    curl -fsSL https://apt.opencardev.org/opencardev.gpg.key \
+        | gpg --dearmor -o /usr/share/keyrings/opencardev-archive-keyring.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/opencardev-archive-keyring.gpg] https://apt.opencardev.org $(lsb_release -cs) stable" \
+        > /etc/apt/sources.list.d/opencardev.list && \
+    apt-get update && \
+    apt-get -yq install --no-install-recommends \
+        libaasdk gstreamer1.0-x gstreamer1.0-plugins-good gstreamer1.0-plugins-base gstreamer1.0-libav \
+        xvfb xdotool ffmpeg && \
+    OA_ARCH=$(dpkg --print-architecture) && \
+    curl -fsSL --output /tmp/openauto.deb \
+        "https://github.com/opencardev/openauto/releases/download/${OA_TAG}/openauto_${OA_VER}_deb13u1_${OA_ARCH}.deb" && \
+    apt-get -yq install --no-install-recommends /tmp/openauto.deb && \
+    rm /tmp/openauto.deb && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* && \
+    # the release links the old sonames; the apt repo ships the new ones
+    ln -sfn libaasdk.so.4         /usr/lib/libaasdk.so.2026 && \
+    ln -sfn libaap_protobuf.so.4  /usr/lib/libaap_protobuf.so.2026
+
+# for `make demo`: vnc on the virtual display, and novnc to reach it from a browser
+RUN apt-get update && \
+    apt-get -yq install --no-install-recommends x11vnc novnc python3-websockify && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY run-autoapp.sh /usr/local/bin/run-autoapp
+# autoapp reads openauto.ini from its working directory
+WORKDIR /etc/openauto
+COPY openauto.ini /etc/openauto/openauto.ini
+CMD ["/usr/local/bin/run-autoapp"]

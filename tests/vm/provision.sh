@@ -21,6 +21,11 @@ printf '[Service]\nEnvironment=GIO_USE_PROXY_RESOLVER=dummy\n' > /etc/systemd/sy
 systemctl daemon-reload
 systemctl restart geoclue
 
+# waydroid's container service starts at boot and loads binder under names
+# of its own, which the module then keeps until the next boot. give it the
+# names sessions/waydroid.sh asks for whoever loads it
+echo 'options binder_linux devices=binder,hwbinder,vndbinder' > /etc/modprobe.d/behead-binder.conf
+
 # android for test_waydroid.py: about 1 GB of images, then rendering on the
 # cpu, since the vm has no gpu, and osmand~ and the f-droid client from
 # f-droid, checked end to end

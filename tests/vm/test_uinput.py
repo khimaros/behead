@@ -25,6 +25,7 @@ EV_SYN, EV_KEY, EV_ABS = 0, 1, 3
 SYN_REPORT = 0
 ABS_MT_SLOT, ABS_MT_POSITION_X, ABS_MT_POSITION_Y, ABS_MT_TRACKING_ID = 0x2F, 0x35, 0x36, 0x39
 KEY_HOMEPAGE, KEY_BACK = 172, 158
+KEY_TAB, KEY_ENTER, KEY_LEFTSHIFT, KEY_UP, KEY_DOWN = 15, 28, 42, 103, 108
 TOUCHSCREEN, KEYS = "behead touchscreen", "behead keys"
 DEVICES = pathlib.Path("/proc/bus/input/devices")
 KIOSK = tcp.ROOT / "sessions/kiosk.sh"
@@ -101,9 +102,9 @@ class UinputTest(tcp.SessionTest):
         super().setUpClass()
         subprocess.run(["modprobe", "uinput"], check=True)
 
-    def bound(self):
+    def bound(self, **options):
         """a headunit whose input channel is open, so the devices exist"""
-        headunit = self.connect()
+        headunit = self.connect(**options)
         headunit.run_until(lambda: headunit.received(fakehu.INPUT_CHANNEL, fakehu.BINDING_REQUEST))
         wait_for(lambda: {TOUCHSCREEN, KEYS} <= input_devices().keys(), "the uinput devices")
         return headunit
@@ -139,6 +140,35 @@ class UinputTest(tcp.SessionTest):
         headunit.button(fakehu.HOME, False)
         headunit.button(fakehu.BACK, True)
         self.assertEqual([pressed for _, pressed in keys.reports(3)], [{KEY_HOMEPAGE}, set(), {KEY_BACK}])
+
+    def test_a_knob_turn_moves_focus(self):
+        """each detent is a key press: tab one way, shift and tab the other"""
+        headunit = self.bound(keycodes=(fakehu.ROTARY,))
+        keys = self.open_device(KEYS)
+        headunit.turn(fakehu.ROTARY, 2)
+        headunit.turn(fakehu.ROTARY, -1)
+        self.assertEqual([pressed for _, pressed in keys.reports(8)],
+                         [{KEY_TAB}, set(), {KEY_TAB}, set(),
+                          {KEY_LEFTSHIFT}, {KEY_LEFTSHIFT, KEY_TAB}, {KEY_LEFTSHIFT}, set()])
+
+    def test_a_knob_turn_can_be_arrow_keys(self):
+        self.restart_server(options=["--knob", "arrows"])
+        headunit = self.bound(keycodes=(fakehu.ROTARY,))
+        keys = self.open_device(KEYS)
+        headunit.turn(fakehu.ROTARY, 1)
+        headunit.turn(fakehu.ROTARY, -2)
+        self.assertEqual([pressed for _, pressed in keys.reports(6)],
+                         [{KEY_DOWN}, set(), {KEY_UP}, set(), {KEY_UP}, set()])
+
+    def test_a_car_without_a_touchscreen_gets_keys_alone(self):
+        headunit = self.connect(touchscreen=None, keycodes=(fakehu.ROTARY, fakehu.DPAD_CENTER))
+        headunit.run_until(lambda: headunit.received(fakehu.INPUT_CHANNEL, fakehu.BINDING_REQUEST))
+        wait_for(lambda: KEYS in input_devices(), "the keys device")
+        self.assertNotIn(TOUCHSCREEN, input_devices())
+        keys = self.open_device(KEYS)
+        headunit.turn(fakehu.ROTARY, 1)
+        headunit.button(fakehu.DPAD_CENTER, True)
+        self.assertEqual([pressed for _, pressed in keys.reports(3)], [{KEY_TAB}, set(), {KEY_ENTER}])
 
     def test_devices_leave_with_the_headunit(self):
         self.bound().sock.close()

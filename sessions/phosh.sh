@@ -27,6 +27,9 @@ idle-delay=uint32 0
 
 [org/gnome/system/location]
 enabled=true
+
+[org/gnome/shell/keybindings]
+toggle-overview=['XF86HomePage']
 EOF
 
 cat > "$runtime/phoc.ini" <<EOF

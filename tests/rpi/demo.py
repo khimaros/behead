@@ -1,6 +1,7 @@
 """an interactive headunit in the browser, for a device on a usb cable: the
-device's video shows on a page, and the mouse on the picture is a finger on
-the car's screen. ctrl-c stops it. needs access to the usb device nodes: see
+device's video shows on a page, the mouse on the picture is a finger on the
+car's screen, its wheel a rotary knob, and the keyboard the car's buttons.
+ctrl-c stops it. needs access to the usb device nodes: see
 70-behead.rules."""
 
 import atexit
@@ -21,8 +22,20 @@ for tier in ("e2e", "vm"):
 import fakehu
 import test_session as tcp
 import test_usb as usb_tier
+import viewer
 
 ACTIONS = {"down": fakehu.TOUCH_DOWN, "move": fakehu.TOUCH_MOVED, "up": fakehu.TOUCH_UP}
+# what the page's keys and wheel become
+CONTROLS = {"button": fakehu.FakeHeadunit.button, "turn": fakehu.FakeHeadunit.turn}
+
+
+def waiting(events):
+    """everything the page has queued so far"""
+    try:
+        while True:
+            yield events.get_nowait()
+    except queue.Empty:
+        pass
 
 
 def stop(*_):
@@ -49,19 +62,17 @@ def main():
         car = tcp.make_v1_cert(pathlib.Path(directory), "car")
         link = usb_tier.UsbLink(fresh_accessory())
         try:
-            headunit = fakehu.FakeHeadunit(link, *car)
+            headunit = fakehu.FakeHeadunit(link, *car, keycodes=viewer.KEYCODES)
             # the tests keep their last picture up for a while; this should just stop
             atexit.unregister(headunit.viewer.linger)
             headunit.handshake()
             while True:
                 # the device streams steadily, so this returns every frame
                 headunit.step()
-                try:
-                    while True:
-                        action, x, y = headunit.viewer.touches.get_nowait()
-                        headunit.touch(ACTIONS[action], [(0, x, y)])
-                except queue.Empty:
-                    pass
+                for action, x, y in waiting(headunit.viewer.touches):
+                    headunit.touch(ACTIONS[action], [(0, x, y)])
+                for kind, keycode, value in waiting(headunit.viewer.controls):
+                    CONTROLS[kind](headunit, keycode, value)
         except KeyboardInterrupt:
             pass
         finally:

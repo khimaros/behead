@@ -25,6 +25,8 @@ struct Target {
     /// one that sees the command's output from the start needs none
     needs_keyframe: bool,
     sent_any: bool,
+    /// the parameter sets the command wrote last
+    config: Vec<u8>,
 }
 
 pub struct Source {
@@ -76,20 +78,28 @@ impl Drop for Source {
     }
 }
 
-/// where a picture goes now: the attached link, unless it is waiting for a
-/// keyframe. x264 puts the parameter sets in front of every keyframe of a
-/// raw stream, so those mark one
-fn destination(target: &Mutex<Target>, unit: &[u8]) -> Option<(Shared, u64)> {
+/// where a picture goes now, and in what form: to the attached link, unless
+/// it is waiting for a keyframe. x264 puts the parameter sets in front of
+/// every keyframe of a raw stream. a hardware encoder writes them once, at
+/// the start, so a keyframe without them gets the last ones seen
+fn destination(target: &Mutex<Target>, unit: Vec<u8>) -> Option<((Shared, u64), Vec<u8>)> {
     let mut target = target.lock().unwrap();
+    let config = h264::split_config(&unit).0;
+    let has_config = !config.is_empty();
+    if has_config {
+        target.config = config.to_vec();
+    }
     let Some(link) = target.link.clone() else {
         target.needs_keyframe = true;
         return None;
     };
-    if target.needs_keyframe && h264::split_config(unit).0.is_empty() {
+    if target.needs_keyframe && !has_config && !h264::is_keyframe(&unit) {
         return None;
     }
-    (target.needs_keyframe, target.sent_any) = (false, true);
-    Some(link)
+    let resumes = std::mem::replace(&mut target.needs_keyframe, false);
+    target.sent_any = true;
+    let unit = if resumes && !has_config { [&target.config[..], &unit].concat() } else { unit };
+    Some((link, unit))
 }
 
 /// read access units until the command exits, sending each to whichever
@@ -108,7 +118,7 @@ fn forward(mut stdout: ChildStdout, target: &Mutex<Target>) {
             },
         };
         for unit in units {
-            let Some((shared, epoch)) = destination(target, &unit) else { continue };
+            let Some(((shared, epoch), unit)) = destination(target, unit) else { continue };
             let (live, ready) = (|link: &Link| link.video_epoch == epoch, |link: &Link| link.session.video_ready());
             let timestamp = started.elapsed().as_micros() as u64;
             send_when_ready(&shared, live, ready, |link| link.session.send_video(timestamp, &unit));

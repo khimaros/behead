@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 
 const START_CODE: [u8; 3] = [0, 0, 1];
 const NAL_TYPE_MASK: u8 = 0x1f;
+const NAL_IDR: u8 = 5;
 const NAL_SPS: u8 = 7;
 const NAL_PPS: u8 = 8;
 /// high bit of the first slice header byte is set when first_mb_in_slice == 0
@@ -87,12 +88,31 @@ pub fn split_config(unit: &[u8]) -> (&[u8], &[u8]) {
     while let Some(code) = find_start_code(unit, from) {
         let nal_type = unit.get(code + 3).map_or(0, |b| b & NAL_TYPE_MASK);
         if nal_type != NAL_SPS && nal_type != NAL_PPS {
-            let start = if code > 0 && unit[code - 1] == 0 { code - 1 } else { code };
+            // zero bytes an encoder pads the first start code with are no parameter sets
+            let start = if from == 0 {
+                0
+            } else if unit[code - 1] == 0 {
+                code - 1
+            } else {
+                code
+            };
             return unit.split_at(start);
         }
         from = code + START_CODE.len();
     }
     (unit, &[])
+}
+
+/// whether an access unit holds an idr picture, which a decoder can start at
+pub fn is_keyframe(unit: &[u8]) -> bool {
+    let mut from = 0;
+    while let Some(code) = find_start_code(unit, from) {
+        if unit.get(code + 3).is_some_and(|b| b & NAL_TYPE_MASK == NAL_IDR) {
+            return true;
+        }
+        from = code + START_CODE.len();
+    }
+    false
 }
 
 #[cfg(test)]
@@ -136,5 +156,14 @@ mod tests {
         let unit = [SPS, PPS, IDR].concat();
         assert_eq!(split_config(&unit), (&[SPS, PPS].concat()[..], IDR));
         assert_eq!(split_config(P), (&[][..], P));
+        let padded = [&[0, 0][..], IDR].concat();
+        assert_eq!(split_config(&padded), (&[][..], &padded[..]));
+    }
+
+    #[test]
+    fn finds_keyframes_with_or_without_parameter_sets() {
+        assert!(is_keyframe(&[SPS, PPS, IDR].concat()));
+        assert!(is_keyframe(IDR));
+        assert!(!is_keyframe(&[P, P_SLICE2].concat()));
     }
 }

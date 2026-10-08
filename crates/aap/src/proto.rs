@@ -64,6 +64,55 @@ pub const VIDEO_FOCUSED: i32 = 1;
 /// location, compass, speed, rpm, odometer, fuel level, parking brake, gear,
 /// night mode, environment and driving status
 pub const SENSOR_TYPES: [i32; 11] = [1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 13];
+/// the fields of a sensor event read here: a sensor's type is also its field
+pub const SENSOR_EVENT_FIELDS: &[u32] = &[1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 13];
+/// the fields of an input event read here, and the display it is meant for (2)
+pub const INPUT_EVENT_FIELDS: &[u32] = &[1, 2, 3, 4, 5, 6, 7];
+
+const WIRE_VARINT: u64 = 0;
+const WIRE_FIXED64: u64 = 1;
+const WIRE_BYTES: u64 = 2;
+const WIRE_FIXED32: u64 = 5;
+
+/// a varint at the front of `body`: its value and how many bytes it took
+fn varint(body: &[u8]) -> Option<(u64, usize)> {
+    let mut value = 0u64;
+    for (index, byte) in body.iter().enumerate().take(10) {
+        value |= u64::from(byte & 0x7f) << (7 * index);
+        if byte & 0x80 == 0 {
+            return Some((value, index + 1));
+        }
+    }
+    None
+}
+
+/// the top level fields of a message whose numbers are not among `known`,
+/// each with the bytes of its value. prost drops what it has no field for,
+/// and a car's unknown controls are exactly that
+pub fn unknown_fields(mut body: &[u8], known: &[u32]) -> Vec<(u32, Vec<u8>)> {
+    let mut unknown = Vec::new();
+    while let Some((tag, tag_bytes)) = varint(body) {
+        body = &body[tag_bytes..];
+        // where the value starts and how long it is. bytes follow their length
+        let span = match tag & 7 {
+            WIRE_VARINT => varint(body).map(|(_, bytes)| (0, bytes)),
+            WIRE_FIXED64 => Some((0, 8)),
+            WIRE_FIXED32 => Some((0, 4)),
+            WIRE_BYTES => varint(body).map(|(length, bytes)| (bytes, length as usize)),
+            _ => None,
+        };
+        let Some((start, end)) = span.and_then(|(start, length)| Some((start, start.checked_add(length)?))) else {
+            break;
+        };
+        let Some(value) = body.get(start..end) else { break };
+        let field = (tag >> 3) as u32;
+        if !known.contains(&field) {
+            unknown.push((field, value.to_vec()));
+        }
+        body = &body[end..];
+    }
+    unknown
+}
 
 pub const TOUCH_DOWN: i32 = 0;
 pub const TOUCH_UP: i32 = 1;
@@ -155,6 +204,9 @@ pub struct InputChannel {
     pub supported_keycodes: Vec<u32>,
     #[prost(message, optional, tag = "2")]
     pub touch_screen_config: Option<TouchConfig>,
+    /// a touchpad, such as the pads on a steering wheel
+    #[prost(message, optional, tag = "3")]
+    pub touch_pad_config: Option<TouchConfig>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -271,6 +323,43 @@ pub struct InputEvent {
     pub touch_event: Option<TouchEvent>,
     #[prost(message, optional, tag = "4")]
     pub button_event: Option<ButtonEvents>,
+    #[prost(message, optional, tag = "5")]
+    pub absolute_event: Option<AbsoluteEvents>,
+    #[prost(message, optional, tag = "6")]
+    pub relative_event: Option<RelativeEvents>,
+    /// a touch on a touchpad, in the touchpad's own coordinates
+    #[prost(message, optional, tag = "7")]
+    pub touchpad_event: Option<TouchEvent>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct AbsoluteEvents {
+    #[prost(message, repeated, tag = "1")]
+    pub absolute_events: Vec<AbsoluteEvent>,
+}
+
+/// a control moved to a position, such as a slider
+#[derive(Clone, PartialEq, Message)]
+pub struct AbsoluteEvent {
+    #[prost(uint32, optional, tag = "1")]
+    pub scan_code: Option<u32>,
+    #[prost(int32, optional, tag = "2")]
+    pub value: Option<i32>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct RelativeEvents {
+    #[prost(message, repeated, tag = "1")]
+    pub relative_events: Vec<RelativeEvent>,
+}
+
+/// a control moved by some steps, such as a rotary knob by its detents
+#[derive(Clone, PartialEq, Message)]
+pub struct RelativeEvent {
+    #[prost(uint32, optional, tag = "1")]
+    pub scan_code: Option<u32>,
+    #[prost(int32, optional, tag = "2")]
+    pub delta: Option<i32>,
 }
 
 #[derive(Clone, PartialEq, Message)]

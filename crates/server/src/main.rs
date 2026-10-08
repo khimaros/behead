@@ -25,7 +25,8 @@ use std::time::Duration;
 
 const USAGE: &str =
     "usage: behead (--cert FILE --key FILE | --cert-dir DIR)... --video-cmd CMD [--audio-cmd CMD] [--mic-cmd CMD]
-              [--audio-delay MS] [--usb UDC | --listen ADDR] [--uinput] [--nmea-socket PATH]
+              [--audio-delay MS] [--usb UDC | --listen ADDR] [--uinput] [--knob KEYS]
+              [--nmea-socket PATH]
        behead teardown
 
   --cert FILE      phone certificate, pem
@@ -47,6 +48,9 @@ const USAGE: &str =
   --listen ADDR    tcp address to accept the headunit on (default 127.0.0.1:5277)
   --uinput         also deliver touch and buttons as kernel input devices,
                    'behead touchscreen' and 'behead keys'. needs /dev/uinput
+  --knob KEYS      what a turn of the car's rotary knob types with --uinput:
+                   'focus' for tab and shift+tab (default), 'arrows' for
+                   down and up
   --nmea-socket PATH  offer the car's location as nmea sentences on a unix
                    socket, for a location service such as geoclue
 
@@ -56,6 +60,8 @@ const TEARDOWN_COMMAND: &str = "teardown";
 const AUTO_UDC: &str = "auto";
 const CERT_EXTENSION: &str = "crt";
 const KEY_EXTENSION: &str = "key";
+/// how much of something a headunit sent that nothing here reads is shown
+const UNKNOWN_BYTES: usize = 32;
 const UNPAIRED_CERT: &str = "--cert needs a --key right after it";
 const READ_BUFFER: usize = 64 * 1024;
 /// pause between usb sessions, so a dying link is not retried in a tight loop
@@ -79,6 +85,7 @@ struct Config {
     audio_delay: Duration,
     mic_cmd: Option<String>,
     uinput: bool,
+    knob: uinput::Knob,
     nmea_socket: Option<PathBuf>,
 }
 
@@ -108,6 +115,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, String> 
     let (mut transport, mut credentials, mut cert, mut video_cmd, mut uinput) =
         (Transport::Tcp(DEFAULT_LISTEN.into()), Vec::new(), None, None, false);
     let (mut audio_cmd, mut mic_cmd, mut nmea_socket, mut audio_delay) = (None, None, None, Duration::ZERO);
+    let mut knob = uinput::Knob::default();
     while let Some(flag) = args.next() {
         if cert.is_some() && flag != "--key" {
             return Err(UNPAIRED_CERT.into());
@@ -136,6 +144,8 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, String> 
                 let ms = value.parse().map_err(|_| format!("--audio-delay takes milliseconds, not {value}"))?;
                 audio_delay = Duration::from_millis(ms)
             }
+            "--knob" if value.is_empty() => {}
+            "--knob" => knob = value.parse()?,
             "--nmea-socket" => nmea_socket = Some(PathBuf::from(value)),
             _ => return Err(format!("unknown flag {flag}")),
         }
@@ -147,7 +157,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, String> 
         return Err("--cert and --key, or --cert-dir, is required".into());
     }
     let video_cmd = video_cmd.ok_or("--video-cmd is required")?;
-    Ok(Config { transport, credentials, video_cmd, audio_cmd, audio_delay, mic_cmd, uinput, nmea_socket })
+    Ok(Config { transport, credentials, video_cmd, audio_cmd, audio_delay, mic_cmd, uinput, knob, nmea_socket })
 }
 
 /// every certificate file in a directory with its key, in name order
@@ -211,37 +221,77 @@ fn send_when_ready(
     live(&link) && send(&mut link).is_ok() && flush(&mut link).is_ok()
 }
 
-/// one text line per touch or button event, in the format the README documents
+/// the start of what a headunit sent, in hex, for an `unknown` line
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().take(UNKNOWN_BYTES).map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// a touch on the touchscreen or a touchpad as a line: every finger down,
+/// and which of them the action is about
+fn touch_line(surface: &str, touch: &aap::proto::TouchEvent) -> String {
+    let action = match touch.touch_action.unwrap_or(-1) {
+        aap::proto::TOUCH_DOWN => "down".to_string(),
+        aap::proto::TOUCH_UP => "up".to_string(),
+        aap::proto::TOUCH_MOVED => "move".to_string(),
+        aap::proto::TOUCH_POINTER_DOWN => "pointer-down".to_string(),
+        aap::proto::TOUCH_POINTER_UP => "pointer-up".to_string(),
+        other => other.to_string(),
+    };
+    let points: Vec<String> = touch
+        .touch_location
+        .iter()
+        .map(|p| format!("{}:{},{}", p.pointer_id.unwrap_or(0), p.x.unwrap_or(0), p.y.unwrap_or(0)))
+        .collect();
+    format!("{surface} {action} {} {}", touch.action_index.unwrap_or(0), points.join(" "))
+}
+
+/// what a headunit's input services offer, one line each, for the log: a
+/// control that sends nothing is usually one the car never listed
+fn describe_inputs(info: &aap::proto::ServiceDiscoveryResponse) -> Vec<String> {
+    let size = |name: &str, config: &Option<aap::proto::TouchConfig>| {
+        config.as_ref().map(|c| format!(", {name} {}x{}", c.width.unwrap_or(0), c.height.unwrap_or(0)))
+    };
+    let inputs = info.channels.iter().filter_map(|c| Some((c.channel_id.unwrap_or(0), c.input_channel.as_ref()?)));
+    inputs
+        .map(|(channel, input)| {
+            let keys: Vec<String> = input.supported_keycodes.iter().map(u32::to_string).collect();
+            let keys = if keys.is_empty() { "no keys".to_string() } else { format!("keys {}", keys.join(" ")) };
+            let screen = size("touchscreen", &input.touch_screen_config).unwrap_or_default();
+            let pad = size("touchpad", &input.touch_pad_config).unwrap_or_default();
+            format!("input channel {channel}: {keys}{screen}{pad}")
+        })
+        .collect()
+}
+
+/// one text line per touch, button or control event, in the format the README documents
 fn input_lines(event: &aap::proto::InputEvent) -> Vec<String> {
-    let mut lines = Vec::new();
-    if let Some(touch) = &event.touch_event {
-        let action = match touch.touch_action.unwrap_or(-1) {
-            aap::proto::TOUCH_DOWN => "down".to_string(),
-            aap::proto::TOUCH_UP => "up".to_string(),
-            aap::proto::TOUCH_MOVED => "move".to_string(),
-            aap::proto::TOUCH_POINTER_DOWN => "pointer-down".to_string(),
-            aap::proto::TOUCH_POINTER_UP => "pointer-up".to_string(),
-            other => other.to_string(),
-        };
-        let points: Vec<String> = touch
-            .touch_location
-            .iter()
-            .map(|p| format!("{}:{},{}", p.pointer_id.unwrap_or(0), p.x.unwrap_or(0), p.y.unwrap_or(0)))
-            .collect();
-        lines.push(format!("touch {action} {} {}", touch.action_index.unwrap_or(0), points.join(" ")));
-    }
+    let surfaces = [("touch", &event.touch_event), ("touchpad", &event.touchpad_event)];
+    let mut lines: Vec<String> =
+        surfaces.iter().filter_map(|(surface, touch)| Some(touch_line(surface, touch.as_ref()?))).collect();
     for button in event.button_event.iter().flat_map(|b| &b.button_events) {
         let state = if button.is_pressed.unwrap_or(false) { "down" } else { "up" };
         lines.push(format!("button {} {state}", button.scan_code.unwrap_or(0)));
     }
+    for control in event.absolute_event.iter().flat_map(|a| &a.absolute_events) {
+        lines.push(format!("absolute {} {}", control.scan_code.unwrap_or(0), control.value.unwrap_or(0)));
+    }
+    for control in event.relative_event.iter().flat_map(|r| &r.relative_events) {
+        lines.push(format!("relative {} {}", control.scan_code.unwrap_or(0), control.delta.unwrap_or(0)));
+    }
     lines
 }
 
-/// kernel input devices matching the headunit's input channel. a failure is
-/// logged rather than fatal, since input still reaches stdout
-fn create_input_devices(info: &aap::proto::ServiceDiscoveryResponse) -> Option<uinput::Devices> {
-    let channel = info.channels.iter().find_map(|channel| channel.input_channel.as_ref())?;
-    uinput::Devices::create(channel).inspect_err(|e| eprintln!("{e}")).ok()
+/// kernel input devices matching the headunit's input services: the keys of
+/// all of them, and the first touchscreen. a failure is logged rather than
+/// fatal, since input still reaches stdout
+fn create_input_devices(info: &aap::proto::ServiceDiscoveryResponse, knob: uinput::Knob) -> Option<uinput::Devices> {
+    let inputs: Vec<_> = info.channels.iter().filter_map(|channel| channel.input_channel.as_ref()).collect();
+    let merged = aap::proto::InputChannel {
+        supported_keycodes: inputs.iter().flat_map(|input| input.supported_keycodes.clone()).collect(),
+        touch_screen_config: inputs.iter().find_map(|input| input.touch_screen_config.clone()),
+        touch_pad_config: None,
+    };
+    (!inputs.is_empty()).then(|| uinput::Devices::create(&merged, knob).inspect_err(|e| eprintln!("{e}")).ok())?
 }
 
 /// print input to stdout, inject it with --uinput, and hand it to the video command
@@ -303,8 +353,9 @@ fn handle(shared: &Shared, link: &mut Link, config: &Config, video: &mut Option<
         Event::Authenticated => eprintln!("headunit authenticated"),
         Event::Discovered(info) => {
             eprintln!("headunit offers {} channels", info.channels.len());
+            describe_inputs(&info).iter().for_each(|line| eprintln!("{line}"));
             if config.uinput {
-                link.input_devices = create_input_devices(&info);
+                link.input_devices = create_input_devices(&info, config.knob);
             }
         }
         Event::VideoStarted(mode) => {
@@ -339,7 +390,14 @@ fn handle(shared: &Shared, link: &mut Link, config: &Config, video: &mut Option<
             readings.location.iter().for_each(nmea::publish);
             deliver_readings(link, sensors::lines(&readings));
         }
-        Event::Unhandled { channel, id } => eprintln!("unhandled message {id:#06x} on channel {channel}"),
+        Event::Unhandled { channel, id, body } => {
+            eprintln!("unhandled message {id:#06x} on channel {channel}");
+            deliver_lines(link, vec![format!("unknown message {channel} {id:#06x} {}", hex(&body))]);
+        }
+        Event::UnknownField { channel, kind, field, value } => {
+            eprintln!("unknown field {field} in a {kind} event on channel {channel}");
+            deliver_lines(link, vec![format!("unknown {kind} {channel} field {field} {}", hex(&value))]);
+        }
         Event::Shutdown => return false,
     }
     true

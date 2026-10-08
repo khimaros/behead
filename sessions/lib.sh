@@ -2,6 +2,7 @@
 # directory, the processes a session starts, and h.264 capture of a wlroots
 # output on stdout. everything started with run() stops with the script.
 . "$(dirname "$0")/home.sh"
+. "$(dirname "$0")/encoder.sh"
 
 # the format of the car's media channel
 SOUND_RATE=48000 SOUND_CHANNELS=2
@@ -72,32 +73,31 @@ wait_for_display() {
     export WAYLAND_DISPLAY="$socket"
 }
 
-# the lowest h.264 level whose macroblock rate fits the mode. wf-recorder
-# hands x264 a microsecond timebase, which x264 would take for the frame
-# rate and so claim level 6.2.
-h264_level() {
-    macroblocks=$(( ($1 + 15) / 16 * (($2 + 15) / 16) * $3 ))
-    if [ "$macroblocks" -le 108000 ]; then echo 31
-    elif [ "$macroblocks" -le 216000 ]; then echo 32
-    elif [ "$macroblocks" -le 245760 ]; then echo 40
-    else echo 42
-    fi
+# record with one encoder until the recorder ends: record ENCODER OUTPUT WIDTH HEIGHT FPS
+record() {
+    # video on stdout, everything wf-recorder says on stderr. capture every
+    # frame at a constant rate, still screen or not, because decoders such as
+    # openauto's show a picture only once more follow it
+    # shellcheck disable=SC2046
+    wf-recorder --output "$2" --overwrite --no-damage --framerate "$5" --muxer h264 --file /dev/fd/3 \
+        $(recorder_options "$1" "$3" "$4" "$5") -p g="$5" 3>&1 >&2 &
+    recorder=$!
+    wait "$recorder" || true
 }
 
 # record an output to stdout until the server goes away: capture OUTPUT WIDTH HEIGHT FPS
 capture() {
-    # video on stdout, everything wf-recorder says on stderr. capture every
-    # frame at a constant rate, still screen or not, because decoders such as
-    # openauto's show a picture only once more follow it
-    wf-recorder --output "$1" --overwrite --no-damage --framerate "$4" --codec libx264 --muxer h264 \
-        --pixel-format yuv420p --file /dev/fd/3 \
-        -p preset=ultrafast -p tune=zerolatency -p profile=baseline -p level="$(h264_level "$2" "$3" "$4")" \
-        -p g="$4" 3>&1 >&2 &
-    recorder=$!
     # wf-recorder notices neither the server going away, while the pipe has
     # room, nor its compositor dying, after which it hangs. end the session
     # when either does
     (while kill -0 "$PPID" 2>/dev/null && kill -0 "$compositor" 2>/dev/null; do sleep 1; done; kill $$) &
     children="$children $!"
-    wait "$recorder"
+    chosen=$(encoder "$2" "$3" "$4")
+    record "$chosen" "$@"
+    # a hardware encoder that would not start, or gave up, leaves the
+    # session without a picture. software always works
+    if [ "$chosen" != x264 ] && kill -0 "$compositor" 2>/dev/null; then
+        echo "encoder $chosen ended, falling back to x264" >&2
+        record x264 "$@"
+    fi
 }

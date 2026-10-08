@@ -21,8 +21,9 @@ ExecStartPre=-/usr/sbin/modprobe uinput
 # /run/behead, for the socket geoclue reads the car's location from
 RuntimeDirectory=behead
 # AUDIO_CMD and AUDIO_DELAY are empty, which the server takes for none,
-# unless the session has sound
-ExecStart=/usr/local/bin/behead --usb auto --cert-dir /etc/behead/certs --uinput --nmea-socket /run/behead/nmea.sock --audio-cmd ${AUDIO_CMD} --audio-delay ${AUDIO_DELAY} --video-cmd ${VIDEO_CMD}
+# unless the session has sound. KNOB is empty unless the session wants
+# other keys from the knob than most
+ExecStart=/usr/local/bin/behead --usb auto --cert-dir /etc/behead/certs --uinput --knob ${KNOB} --nmea-socket /run/behead/nmea.sock --audio-cmd ${AUDIO_CMD} --audio-delay ${AUDIO_DELAY} --video-cmd ${VIDEO_CMD}
 ExecStopPost=/usr/local/bin/behead teardown
 ExecStopPost=-/usr/sbin/modprobe g_ether
 Restart=on-failure

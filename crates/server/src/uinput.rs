@@ -62,6 +62,61 @@ const KEYMAP: [(u32, u16); 19] = [
     (164, 113), // volume mute: KEY_MUTE
 ];
 
+/// the android key code a rotary knob's turns arrive under
+const ROTARY: u32 = 65536;
+const KEY_TAB: u16 = 15;
+const KEY_LEFTSHIFT: u16 = 42;
+const KEY_UP: u16 = 103;
+const KEY_DOWN: u16 = 108;
+/// detents typed out of one turn, so a wild delta cannot hold the session up
+const MAX_DETENTS: u32 = 32;
+
+/// what a turn of the car's rotary knob types, one detent at a time. linux
+/// has no input for a knob that applications agree on, so it becomes keys
+#[derive(Clone, Copy, Default)]
+pub enum Knob {
+    /// tab and shift+tab: the next and previous thing that takes focus
+    #[default]
+    Focus,
+    /// down and up, for applications that give tab another meaning
+    Arrows,
+}
+
+impl std::str::FromStr for Knob {
+    type Err = String;
+
+    fn from_str(name: &str) -> Result<Self, String> {
+        match name {
+            "focus" => Ok(Self::Focus),
+            "arrows" => Ok(Self::Arrows),
+            _ => Err(format!("--knob takes focus or arrows, not {name}")),
+        }
+    }
+}
+
+impl Knob {
+    /// the keys held together for one detent, in the order they go down
+    fn chord(self, clockwise: bool) -> &'static [u16] {
+        match (self, clockwise) {
+            (Self::Focus, true) => &[KEY_TAB],
+            (Self::Focus, false) => &[KEY_LEFTSHIFT, KEY_TAB],
+            (Self::Arrows, true) => &[KEY_DOWN],
+            (Self::Arrows, false) => &[KEY_UP],
+        }
+    }
+
+    fn keys(self) -> impl Iterator<Item = u16> {
+        [true, false].into_iter().flat_map(move |clockwise| self.chord(clockwise).iter().copied())
+    }
+
+    /// one detent as key reports: the chord pressed, then released in reverse
+    fn detent(self, clockwise: bool) -> Vec<Event> {
+        let chord = self.chord(clockwise);
+        let presses = chord.iter().map(|&key| (key, 1)).chain(chord.iter().rev().map(|&key| (key, 0)));
+        presses.flat_map(|(key, value)| [(EV_KEY, key, value), (EV_SYN, SYN_REPORT, 0)]).collect()
+    }
+}
+
 type Event = (u16, u16, i32);
 /// positions of the fingers down, by android pointer id
 type Contacts = BTreeMap<u32, (i32, i32)>;
@@ -203,17 +258,21 @@ impl Touchscreen {
 }
 
 /// the headunit's input as kernel devices: a touchscreen spanning its touch
-/// area, and a keyboard with the keys it advertised that have a linux match
+/// area, and a keyboard with the keys it advertised that have a linux match,
+/// plus the keys its knob types if it has one
 pub struct Devices {
     touchscreen: Option<Touchscreen>,
     keys: Option<Device>,
+    knob: Knob,
 }
 
 impl Devices {
-    pub fn create(channel: &proto::InputChannel) -> Result<Self, String> {
+    pub fn create(channel: &proto::InputChannel, knob: Knob) -> Result<Self, String> {
         let area = channel.touch_screen_config.as_ref().and_then(|c| Some((c.width?, c.height?)));
         let touchscreen = area.filter(|&(w, h)| w > 0 && h > 0).map(|(w, h)| Touchscreen::create(w, h)).transpose()?;
-        let keys: Vec<u16> = channel.supported_keycodes.iter().filter_map(|&code| linux_key(code)).collect();
+        let codes = &channel.supported_keycodes;
+        let turned = codes.contains(&ROTARY).then(|| knob.keys()).into_iter().flatten();
+        let keys: Vec<u16> = codes.iter().filter_map(|&code| linux_key(code)).chain(turned).collect();
         let keys = (!keys.is_empty())
             .then(|| {
                 Device::create(KEYS_NAME, |file| {
@@ -222,7 +281,7 @@ impl Devices {
                 })
             })
             .transpose()?;
-        Ok(Self { touchscreen, keys })
+        Ok(Self { touchscreen, keys, knob })
     }
 
     pub fn deliver(&mut self, event: &proto::InputEvent) -> Result<(), String> {
@@ -235,6 +294,24 @@ impl Devices {
                 keys.emit(&[(EV_KEY, key, button.is_pressed.unwrap_or(false) as i32), (EV_SYN, SYN_REPORT, 0)])?;
             }
         }
+        let turns = event.relative_event.iter().flat_map(|r| &r.relative_events);
+        for delta in turns.filter(|turn| turn.scan_code == Some(ROTARY)).filter_map(|turn| turn.delta) {
+            for _ in 0..delta.unsigned_abs().min(MAX_DETENTS) {
+                keys.emit(&self.knob.detent(delta > 0))?;
+            }
+        }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_detent_back_holds_shift_around_tab() {
+        let report = |key, value| [(EV_KEY, key, value), (EV_SYN, SYN_REPORT, 0)];
+        let expected = [report(KEY_LEFTSHIFT, 1), report(KEY_TAB, 1), report(KEY_TAB, 0), report(KEY_LEFTSHIFT, 0)];
+        assert_eq!(Knob::Focus.detent(false), expected.concat());
     }
 }

@@ -77,8 +77,11 @@ switching to the car's own screen and back, or a reconnect, must not
 restart what the phone shows. while no headunit is watching, its pictures
 are read and dropped, so it never blocks. a headunit that missed part of
 the stream picks it up at the next keyframe, which it can only decode from;
-x264 puts the parameter sets in front of every keyframe of a raw stream,
-which is how they are found, so a command must do the same. a new mode, or
+a keyframe is an idr picture, or a unit that carries parameter sets. x264
+puts the parameter sets in front of every keyframe of a raw stream; a
+hardware encoder may write them only once, at the start, so `video.rs`
+keeps the last ones it saw and puts them in front of the keyframe a
+headunit resumes at. a new mode, or
 the command exiting, starts it afresh.
 
 the command runs in a process group of its own, and stopping it sends the
@@ -103,8 +106,27 @@ gpu): osmand~ cold start 7.2 to 8.8 s against 3.4 to 4.3 s, settings 2.0 to
 2.4 s against 0.7 to 1.2 s, the launcher's median frame 31 ms against 12 ms,
 its 95th percentile 117 ms against 36 ms, and surfaceflinger idle at 44% of
 a core against 5%. what stays is the capture: wf-recorder with x264 takes
-45% of a core whatever is on screen. the pi's hardware encoder
-(`h264_v4l2m2m`) is the thing to try next.
+45% of a core whatever is on screen.
+
+the sessions choose their encoder in `sessions/encoder.sh`: the hardware
+one (`h264_v4l2m2m`, the pi 4's) for pictures of 500000 pixels and more
+where a one frame trial encode with ffmpeg succeeds, x264 otherwise, and
+x264 again if the hardware recorder ends while the compositor lives.
+`BEHEAD_ENCODER=x264` or `v4l2m2m` names one outright. the size limit comes
+from the pi (2026-10-04, wf-recorder's share of a core and touch to picture
+through the kiosk, x264 then hardware): at 800x480, 48% against 37% and
+103 ms against 170 ms; at 1280x720, 95% against 63%. the hardware saves
+little on a small picture, since reading the screen back and converting it
+stay in software, and it holds pictures back a frame or two. at 720p x264
+is at the limit of its one thread, so there the hardware is worth its
+delay. it is given yuv420p: with nv12, which it also accepts, the picture
+comes out green from halfway down, from ffmpeg as from wf-recorder. it
+takes a bit rate in place of a quality, 0.35 bits per pixel, has its
+profile set to baseline, and reports level 4 whatever it is asked.
+
+the pipe demo keeps x264 through ffmpeg: with the hardware encoder its
+touch to picture time on the pi goes from 34 ms to 67 ms, past the 50 ms
+it is held to.
 
 - `kiosk.sh`: sway, with one application full screen.
 - `phosh.sh`: phoc with the phosh shell, on a session bus of its own and
@@ -112,7 +134,10 @@ a core against 5%. what stays is the capture: wf-recorder with x264 takes
   runtime directory, so the screen neither locks nor blanks. phosh locks at
   startup unless GDMSESSION says a display manager already let the user in,
   so the script sets it. a pulseaudio of the session's own gives its
-  applications sound (see audio).
+  applications sound (see audio). the overview opens by a swipe, which a
+  car without a touchscreen cannot make, so the keyfile binds the car's
+  home button (XF86HomePage) to phosh's toggle-overview, which has no key
+  by default.
 - `waydroid.sh`: android's full ui in the kiosk. it loads binder with the
   three legacy devices, since debian's kernel has no binderfs, starts the
   container, and stops the android session when the car session ends,
@@ -211,7 +236,28 @@ the microphone response. none of them affects what behead sends or reads.
 ## input
 
 touch and button events become text lines, printed to stdout and written to
-the video command's stdin. the stdin pipe is non-blocking: a command that
+the video command's stdin. so do the two kinds of event a car's other
+controls send, fields 5 and 6 of the input event, which AACS leaves out and
+aasdk has: relative, a rotary knob's turns in detents under key code 65536,
+and absolute, a control's position. a knob's tilt and click are ordinary
+dpad buttons. `--uinput` types a knob's turn as keys, described below, and
+does not pass absolute events on, so only a video command reading the lines
+sees those.
+
+a headunit may offer more than one input service, a touchpad or a set of
+buttons beside the touchscreen, each on a channel of its own. every one is
+opened and sent a binding request for its keys, since a headunit sends
+nothing from an input service it was not asked to bind. a touchpad's
+touches are field 7 of the input event, the touchscreen's message in the
+pad's coordinates, and come out as `touchpad` lines. the server logs what
+each input service offers at service discovery.
+
+what arrives unread is kept visible, because a car is the only source for
+what its controls send: `proto::unknown_fields` walks the top level of an
+input or sensor event for field numbers prost has no member for, and a
+message with an id no channel handles is passed on whole. both become
+`unknown` lines, on stdout and to the video command, so the demo shows
+them on the car's own screen. the stdin pipe is non-blocking: a command that
 does not read its input loses lines instead of stalling the session.
 
 with `--uinput`, `uinput.rs` also creates two kernel input devices once
@@ -225,6 +271,13 @@ car as local hardware, without a per-compositor injection path.
   handles any difference between the two.
 - `behead keys`: the advertised android key codes that have a linux
   equivalent (home to KEY_HOMEPAGE, back to KEY_BACK, dpad, media, volume).
+  a car that lists the rotary knob also gets the keys its turn types, one
+  press and release per detent. keys were chosen over a wheel axis because
+  a wheel scrolls whatever lies under a pointer the car has no way to move,
+  while keys go to whatever has focus. no pair of keys suits every
+  application, so `--knob` picks: tab and shift+tab, which most toolkits
+  read as next and previous, or down and up for kodi, where tab switches
+  to the player.
 
 ## sensors
 

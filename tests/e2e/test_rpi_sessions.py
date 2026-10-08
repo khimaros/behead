@@ -139,6 +139,13 @@ class RpiSessions(unittest.TestCase):
         self.assertRegex(self.env.read_text(), r"(?m)^AUDIO_DELAY=[1-9]\d*$")
         self.assertIn(" --audio-delay ${AUDIO_DELAY} ", UNIT.read_text())
 
+    def test_kodi_takes_the_knob_as_arrow_keys(self):
+        """tab, what a knob's turn is elsewhere, leaves kodi's menus for
+        whatever is playing"""
+        self.collect(SESSION="kodi")
+        self.assertIn("KNOB=arrows\n", self.env.read_text())
+        self.assertIn(" --knob ${KNOB} ", UNIT.read_text())
+
     def test_kodi_renders_on_the_gpu(self):
         self.collect(SESSION="kodi")
         self.assertIn("BEHEAD_RENDERER=gles2\n", self.env.read_text())

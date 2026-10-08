@@ -5,6 +5,7 @@ BEHEAD_HEADED is the port to serve on, or 1 for the default."""
 
 import atexit
 import http.server
+import json
 import os
 import queue
 import socket
@@ -20,9 +21,18 @@ JPEG_END = b"\xff\xd9"
 # when the next one starts, and a still screen sends no next one
 PICTURE_END = b"\x00\x00\x00\x01\x09\xf0"
 RELOAD_MS = 40
+# the keyboard as a car's buttons, by android key code: the arrows tilt a
+# rotary knob, enter clicks it, and the mouse wheel turns it
+KEYS = {"ArrowUp": 19, "ArrowDown": 20, "ArrowLeft": 21, "ArrowRight": 22, "Enter": 23,
+        "Escape": 4, "Backspace": 4, "h": 3}
+ROTARY = 65536
+# what a headunit has to advertise for the page's controls to reach the phone
+KEYCODES = sorted({*KEYS.values(), ROTARY})
+HELP = "mouse: finger. wheel: knob. arrows: tilt. enter: click. escape: back. h: home"
 PAGE = f"""<!doctype html><title>behead headunit</title>
 <body style="margin:0;background:#000;display:flex;justify-content:center;align-items:center;height:100vh">
 <p id="waiting" style="color:#888;font:16px sans-serif">waiting for video</p>
+<p style="position:fixed;bottom:0;margin:4px;color:#666;font:12px sans-serif">{HELP}</p>
 <img id="picture" draggable="false" style="max-width:100%;max-height:100%;display:none">
 <script>
 // looked up by id: a bare `screen` would be the browser's own window.screen
@@ -42,6 +52,18 @@ const touch = (action, event) => {{
 picture.onpointerdown = (event) => {{ down = true; picture.setPointerCapture(event.pointerId); touch("down", event); }};
 picture.onpointermove = (event) => down && touch("move", event);
 picture.onpointerup = (event) => {{ down = false; touch("up", event); }};
+// the keyboard is the car's buttons. a held key repeats, a held button does not
+const keys = {json.dumps(KEYS)};
+const button = (event, pressed) => {{
+  const code = keys[event.key];
+  if (code === undefined || event.repeat) return;
+  event.preventDefault();
+  fetch(`/button?code=${{code}}&pressed=${{pressed}}`);
+}};
+onkeydown = (event) => button(event, 1);
+onkeyup = (event) => button(event, 0);
+// one notch of the wheel is one detent of the knob
+onwheel = (event) => fetch(`/turn?delta=${{Math.sign(event.deltaY)}}`);
 </script></body>""".encode()
 READ_CHUNK = 65536
 
@@ -72,6 +94,8 @@ class Viewer:
         # (action, x, y) for each mouse event on the picture, for whoever
         # wants to pass them on as touches. the tests ignore them
         self.touches = queue.SimpleQueue()
+        # ("button", key code, pressed) and ("turn", key code, detents), likewise
+        self.controls = queue.SimpleQueue()
         threading.Thread(target=self.collect, daemon=True).start()
         server = http.server.ThreadingHTTPServer(("", port), self.handler())
         threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -107,11 +131,15 @@ class Viewer:
 
             def do_GET(self):
                 url = urllib.parse.urlparse(self.path)
+                query = {name: values[0] for name, values in urllib.parse.parse_qs(url.query).items()}
                 if url.path == "/touch":
-                    query = urllib.parse.parse_qs(url.query)
-                    viewer.touches.put((query["action"][0], int(query["x"][0]), int(query["y"][0])))
+                    viewer.touches.put((query["action"], int(query["x"]), int(query["y"])))
+                elif url.path == "/button":
+                    viewer.controls.put(("button", int(query["code"]), query["pressed"] == "1"))
+                elif url.path == "/turn":
+                    viewer.controls.put(("turn", ROTARY, int(query["delta"])))
                 frame = url.path == "/frame.jpg"
-                body = viewer.latest if frame else b"" if url.path == "/touch" else PAGE
+                body = viewer.latest if frame else PAGE if url.path == "/" else b""
                 self.send_response(200 if body else 204)
                 self.send_header("Content-Type", "image/jpeg" if frame else "text/html")
                 self.send_header("Cache-Control", "no-store")

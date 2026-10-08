@@ -23,6 +23,17 @@ X-Purism-FormFactor=Workstation;Mobile;
 APP_ICON = (57, 145)
 APP_ICON_BOX = (25, 112, 90, 180)
 LIGHT, ICON_PIXELS = 200, 300
+# the same icon once an application runs, when its thumbnail takes the top
+RUNNING_ICON_BOX = (25, 295, 90, 363)
+# the top edge of the ring phosh draws around the icon that has focus, and
+# how much bluer than red it is, where the rest of the overview is grey. the
+# ring is two pixels thick
+FOCUS_RING = (20, 108, 95, 118)
+RING_BLUE, RING_PIXELS = 50, 100
+# more turns than the overview has places for focus to rest
+MAX_TURNS = 8
+# how long a move of focus takes to reach the car's picture
+SETTLE = 1
 # the demo's background and its marker for the first finger
 DEMO_BACKGROUND, DEMO_MARKER = (24, 28, 36), (255, 64, 64)
 TOUCH = (600, 300)
@@ -46,7 +57,26 @@ def demo_running():
     return subprocess.run(["pgrep", "-f", f"{tcp.DEMO} --wayland"], capture_output=True).returncode == 0
 
 
+def is_light(pixel):
+    return min(pixel) > LIGHT
+
+
+def is_ring(pixel):
+    red, _, blue = pixel
+    return blue - red > RING_BLUE
+
+
 class PhoshTest(desktop.DesktopTest):
+    KEYCODES = (fakehu.HOME, fakehu.BACK, fakehu.DPAD_CENTER, fakehu.ROTARY)
+
+    @classmethod
+    def count(cls, box, wanted):
+        """how many pixels of a box in the latest picture pass a check"""
+        frame, (left, top, right, bottom) = cls.last_frame(), box
+        pixels = (frame[(y * desktop.WIDTH + x) * 3:(y * desktop.WIDTH + x) * 3 + 3]
+                  for y in range(top, bottom) for x in range(left, right))
+        return sum(1 for pixel in pixels if wanted(pixel)) if frame else 0
+
     @classmethod
     def prepare(cls):
         applications = cls.dir / "home/.local/share/applications"
@@ -105,20 +135,35 @@ class PhoshTest(desktop.DesktopTest):
 
     @classmethod
     def started(cls):
-        frame = cls.last_frame()
-        if not frame:
-            return False
-        left, top, right, bottom = APP_ICON_BOX
-        pixels = (frame[(y * desktop.WIDTH + x) * 3:(y * desktop.WIDTH + x) * 3 + 3]
-                  for y in range(top, bottom) for x in range(left, right))
-        return sum(1 for pixel in pixels if min(pixel) > LIGHT) >= ICON_PIXELS
+        return cls.count(APP_ICON_BOX, is_light) >= ICON_PIXELS
+
+    def showing_the_app(self):
+        return near(self.pixel(desktop.WIDTH // 2, desktop.HEIGHT // 2), DEMO_BACKGROUND)
+
+    def test_the_knob_alone_opens_an_app_and_home_leaves_it(self):
+        """a car without a touchscreen: turns walk the overview's icons, a
+        click opens the one in focus, and home goes to the overview and back"""
+        self.addCleanup(subprocess.run, ["pkill", "-f", f"{tcp.DEMO} --wayland"])
+        for _ in range(MAX_TURNS):
+            if self.count(FOCUS_RING, is_ring) >= RING_PIXELS:
+                break
+            self.headunit.turn(fakehu.ROTARY, 1)
+            self.pump_for(SETTLE)
+        else:
+            self.fail("turning the knob never put the app's icon in focus")
+        self.press(fakehu.DPAD_CENTER)
+        self.wait_for(demo_running, "launched the app")
+        self.wait_for(self.showing_the_app, "showed the app")
+        self.press(fakehu.HOME)
+        self.wait_for(lambda: self.count(RUNNING_ICON_BOX, is_light) >= ICON_PIXELS, "showed its overview")
+        self.press(fakehu.HOME)
+        self.wait_for(self.showing_the_app, "went back to the app")
 
     def test_a_tapped_app_opens_and_takes_touch(self):
         self.addCleanup(subprocess.run, ["pkill", "-f", f"{tcp.DEMO} --wayland"])
         self.tap(*APP_ICON)
         self.wait_for(demo_running, "launched the app")
-        self.wait_for(lambda: near(self.pixel(desktop.WIDTH // 2, desktop.HEIGHT // 2), DEMO_BACKGROUND),
-                      "showed the app")
+        self.wait_for(self.showing_the_app, "showed the app")
         self.headunit.touch(fakehu.TOUCH_DOWN, [(0, *TOUCH)])
         self.addCleanup(self.headunit.touch, fakehu.TOUCH_UP, [(0, *TOUCH)])
         self.wait_for(lambda: near(self.pixel(*TOUCH), DEMO_MARKER), "drew a marker under the finger")

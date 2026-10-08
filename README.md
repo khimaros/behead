@@ -32,9 +32,10 @@ touch. it runs on a raspberry pi 4, tested from a laptop over usb, and a
   react to them; lines it does not read in time are dropped.
   the command keeps running while the car shows its own screen and across
   reconnects, so the applications it shows keep their state; a new mode
-  restarts it. it must put the h.264 parameter sets in front of every
-  keyframe, as x264 does for a raw stream, so the car can pick the stream up
-  again. it must produce frames in real time: frames are sent as they
+  restarts it. the car picks the stream up again at a keyframe, with the
+  parameter sets the command wrote last, so a hardware encoder that writes
+  them only once works as well as x264, which repeats them. it must produce
+  frames in real time: frames are sent as they
   arrive. for a generated source use ffmpeg's `realtime` filter, not `-re`,
   which lets the first half second out in one burst
 - `--audio-cmd`: shell command writing signed 16 bit little endian pcm to
@@ -57,6 +58,12 @@ touch. it runs on a raspberry pi 4, tested from a laptop over usb, and a
   compositor receive them directly. needs write access to `/dev/uinput`.
   map the touchscreen to the output shown on the headunit, for example in
   sway: `input "0:0:behead_touchscreen" map_to_output HEADLESS-1`
+- `--knob`: what a turn of the car's rotary knob types on `behead keys`, one
+  key press per detent. `focus`, the default, is tab one way and shift+tab
+  the other, which moves between the things on screen in most applications.
+  `arrows` is down and up, for applications such as kodi where tab does
+  something else. the pi image's kodi session uses `arrows`; `KNOB` in
+  `/etc/behead/behead.env` sets it for the others
 - `--nmea-socket`: offer the car's location on a unix socket at this path,
   as the nmea sentences of a gps receiver (GGA and RMC), for a location
   service to read. a reader gets the latest fix when it connects and every
@@ -67,7 +74,7 @@ in usb mode the server creates the kernel gadget on start and removes it on
 SIGINT or SIGTERM. if it was killed before it could, `behead teardown`
 removes what was left.
 
-touch and button events from the headunit are printed to stdout:
+touch, button and control events from the headunit are printed to stdout:
 
     touch down 0 0:123,456
     touch pointer-down 1 0:123,456 1:300,200
@@ -75,10 +82,28 @@ touch and button events from the headunit are printed to stdout:
     touch pointer-up 1 0:123,456 1:310,210
     touch up 0 0:123,456
     button 3 down
+    relative 65536 -1
+    absolute 65536 40
+    touchpad down 0 0:400,300
+    unknown input 1 field 9 0102
+    unknown message 1 0x80f9 abcd
 
 a touch line is `touch <action> <action index> <pointer id>:<x>,<y> ...`,
 listing every finger on the screen. the action index says which of them the
-action applies to.
+action applies to. buttons and controls are named by their android key code.
+a rotary knob is 65536: a turn is `relative 65536 <detents>`, negative one
+way and positive the other, a tilt is a dpad button (19 to 22) and a click
+the dpad's centre (23). `absolute <code> <value>` is a control moved to a
+position. a `touchpad` line is a touch line for a car's touchpad, such as
+the pads on a steering wheel, in the pad's own coordinates.
+
+what a car sends that the server has no name for is printed too, to look
+into: `unknown input <channel> field <number> <hex>` for a part of an input
+event, `unknown sensor ...` likewise, and `unknown message <channel> <id>
+<hex>` for a whole message, each with up to 32 bytes of it. the server's log
+lists what each of the car's input channels offers when it connects:
+
+    input channel 1: keys 3 4 19 20 21 22 23, touchscreen 800x480
 
 readings from the car's sensors follow the same way, one line each, for
 every sensor the car offers:
@@ -124,7 +149,12 @@ car negotiated and reacts to its input:
 - the resolution, frame rate and a frame counter
 - a bar sweeping along the bottom at a fixed speed, so stutter is visible
 - a numbered, coloured marker under every finger, and a trail behind drags
-- how many touches so far, how many fingers are down, the last button
+- how many touches so far, how many fingers are down, and where the rotary
+  knob stands
+- where a finger rests on the car's touchpad, if it has one
+- the last six input events: every button with its name, each turn of the
+  knob, each finger going down or up, on the screen or the touchpad, and
+  anything the server could not read, as `UNKNOWN` with its bytes
 
 openauto's keys: enter, the arrow keys, escape (back) and h (home) send the
 matching android auto buttons. `VIDEO_CMD=... make demo` swaps the demo for
@@ -141,7 +171,12 @@ through `--uinput`:
         --video-cmd 'sessions/kiosk.sh {width} {height} {fps} behead-demo --wayland'
 
 it needs sway, wf-recorder and x264, renders on the cpu, and runs as root
-because it opens input devices without a login session. on a machine with a
+because it opens input devices without a login session. every session
+encodes with the machine's hardware encoder (`h264_v4l2m2m`, as on the
+rpi4) when the picture is 1280x720 or larger and a trial encode with ffmpeg
+works, and with x264 otherwise. `BEHEAD_ENCODER=x264` or `v4l2m2m` in the
+server's environment chooses one regardless; the hardware costs less cpu
+and adds a frame or two of delay. on a machine with a
 gpu, such as the rpi4, set `BEHEAD_RENDERER=gles2` in the server's
 environment and every session renders on it instead; on the pi android then
 opens apps in about half the time. `behead-demo
@@ -176,7 +211,9 @@ droidian, with its overview and apps on the headunit:
 it needs phosh, phoc, gnome-settings-daemon-common and gsettings, and like
 the kiosk it renders on the cpu and runs as root. the screen does not lock
 or blank, and applications are asked for their dark style while the car
-reports night.
+reports night. a car without a touchscreen drives it with its knob: a turn
+moves between the overview's icons, a click opens one, and the home button
+goes to the overview and back.
 
 the session runs a pulseaudio of its own, so its applications have sound.
 it plays into the same alsa loopback as kodi, and the same command records
@@ -379,8 +416,9 @@ installed on the laptop, and the pi's usb-c port cabled to it. it also
 prints the pi's touch to picture latency.
 
 `make demo-rpi` makes the browser the pi's headunit: its video on a page,
-which opens by itself, and the mouse on the picture as a finger. ctrl-c
-stops it.
+which opens by itself, and the mouse on the picture as a finger. the mouse
+wheel turns a rotary knob, the arrow keys tilt it and enter clicks it;
+escape is back and h is home. ctrl-c stops it.
 
 three tests check the phone certificate the way a strict car would, against
 google's automotive link root, and skip unless given it. one walks the pi

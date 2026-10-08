@@ -1,19 +1,26 @@
 # ROADMAP
 
 ```
-[@] sensors: location
-[ ] sensors: day/night
-[ ] sensors: speed
-[ ] software: sensors in waydroid
-[ ] software: sensors in phosh
+[@] input: support for rotary encoders as sole input
+[@] software: sensors in waydroid
+    [x] location sensor
+[@] software: sensors in phosh
+    [x] location sensor
+[ ] hardware: port to ESP32-P4
+[ ] hardware: port to Pi Zero 2W
 
 [?] build: image layers rpi/base/{depends,overlay} rpi/waydroid/...
 
+[>] sensors: day/night
+[>] sensors: speed
 [>] sensors: parking break
 [>] sensors: odometer
 [>] audio: navigation channel
 [>] audio: system sound channel
 
+[x] software: demo displays all button events
+[x] display: hardware x264 encoding
+[x] sensors: location
 [x] protocol: vehicle sensor data
 [x] software: waydroid + F-Droid + OSMAnd~
 [x] system: automated extraction of phone keys

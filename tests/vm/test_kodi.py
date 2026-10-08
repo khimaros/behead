@@ -60,7 +60,7 @@ def focused_label():
 
 
 class KodiTest(desktop.DesktopTest):
-    KEYCODES = (fakehu.BACK, fakehu.DPAD_UP, fakehu.DPAD_DOWN, fakehu.DPAD_CENTER)
+    KEYCODES = (fakehu.HOME, fakehu.BACK, fakehu.DPAD_UP, fakehu.DPAD_DOWN, fakehu.DPAD_CENTER, fakehu.ROTARY)
 
     @classmethod
     def prepare(cls):
@@ -83,7 +83,7 @@ class KodiTest(desktop.DesktopTest):
 
     @classmethod
     def server_options(cls):
-        return ["--audio-cmd", desktop.AUDIO_CMD]
+        return ["--audio-cmd", desktop.AUDIO_CMD, "--knob", "arrows"]
 
     @classmethod
     def started(cls):
@@ -134,6 +134,12 @@ class KodiTest(desktop.DesktopTest):
         self.press(fakehu.BACK)
         self.wait_for_window(HOME_WINDOW)
 
+    def test_home_button_returns_home(self):
+        rpc("GUI.ActivateWindow", window="settings")
+        self.wait_for_window(SETTINGS_WINDOW)
+        self.press(fakehu.HOME)
+        self.wait_for_window(HOME_WINDOW)
+
     def test_plays_a_clip_with_sound(self):
         """the clip's tone, played by kodi, reaches the car as media audio"""
         rpc("Player.Open", item={"file": str(self.clip)})
@@ -148,6 +154,13 @@ class KodiTest(desktop.DesktopTest):
         self.wait_for(lambda: focused_label() == start, f"moved focus back up to {start}")
         self.press(fakehu.DPAD_CENTER)
         self.wait_for(lambda: current_window() not in (HOME_WINDOW, None), f"opened {start}")
+
+    def test_the_knob_moves_through_the_menu(self):
+        start = focused_label()
+        self.headunit.turn(fakehu.ROTARY, 1)
+        self.wait_for(lambda: focused_label() not in (start, None), f"moved focus on from {start}")
+        self.headunit.turn(fakehu.ROTARY, -1)
+        self.wait_for(lambda: focused_label() == start, f"moved focus back to {start}")
 
 
 if __name__ == "__main__":

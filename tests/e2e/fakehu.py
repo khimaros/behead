@@ -26,6 +26,8 @@ SENSOR_START_REQUEST, SENSOR_START_RESPONSE, SENSOR_EVENT = 0x8001, 0x8002, 0x80
 
 # channel numbers as openauto assigns them
 VIDEO_CHANNEL, INPUT_CHANNEL, MEDIA_AUDIO_CHANNEL, MICROPHONE_CHANNEL, SENSOR_CHANNEL = 3, 1, 4, 7, 2
+# a second input service, which openauto does not have
+TOUCHPAD_CHANNEL = 9
 # sensor types. each is also the field its readings take in a sensor event
 (SENSOR_LOCATION, SENSOR_COMPASS, SENSOR_SPEED, SENSOR_RPM, SENSOR_ODOMETER, SENSOR_FUEL, SENSOR_PARKING_BRAKE,
  SENSOR_GEAR) = range(1, 9)
@@ -43,6 +45,9 @@ FOCUS_PROJECTED, FOCUS_NATIVE = 1, 2
 TOUCH_DOWN, TOUCH_UP, TOUCH_MOVED, TOUCH_POINTER_DOWN, TOUCH_POINTER_UP = 0, 1, 2, 5, 6
 # android key codes
 HOME, BACK, DPAD_UP, DPAD_DOWN, DPAD_LEFT, DPAD_RIGHT, DPAD_CENTER = 3, 4, 19, 20, 21, 22, 23
+# a rotary knob: it turns as relative events, tilts as the dpad and clicks as its centre
+ROTARY = 65536
+TOUCHSCREEN = (800, 480)
 VARINT, LENGTH_DELIMITED = 0, 2
 TIMEOUT = 10
 
@@ -90,32 +95,43 @@ def parse(data):
     return fields
 
 
-def service_discovery_response(resolution, frame_rate, keycodes):
+def input_channel(channel, keycodes, screen=None, pad=None):
+    """an input service: its keys, and the size of its touchscreen or touchpad"""
+    keys = b"".join(field(1, keycode) for keycode in keycodes)
+    surfaces = b"".join(field(number, field(1, size[0]) + field(2, size[1]))
+                        for number, size in ((2, screen), (3, pad)) if size)
+    return field(1, channel) + field(4, keys + surfaces)
+
+
+def service_discovery_response(resolution, frame_rate, keycodes, touchpad=None, touchscreen=TOUCHSCREEN):
     video_config = field(1, resolution) + field(2, frame_rate) + field(3, 0) + field(4, 0) + field(5, 140)
     video = field(1, VIDEO_CHANNEL) + field(3, field(1, 3) + field(4, video_config))
-    keys = b"".join(field(1, keycode) for keycode in keycodes)
-    touch = field(1, INPUT_CHANNEL) + field(4, keys + field(2, field(1, 800) + field(2, 480)))
+    touch = input_channel(INPUT_CHANNEL, keycodes, screen=touchscreen)
+    # a pad with keys of its own, as on a steering wheel, is a second input service
+    pads = [input_channel(TOUCHPAD_CHANNEL, touchpad[2], pad=touchpad[:2])] if touchpad else []
     media_config = field(1, MEDIA_RATE) + field(2, SAMPLE_BITS) + field(3, MEDIA_CHANNELS)
     media = field(1, MEDIA_AUDIO_CHANNEL) + field(3, field(1, STREAM_AUDIO) + field(2, AUDIO_TYPE_MEDIA)
                                                    + field(3, media_config))
     microphone_config = field(1, MICROPHONE_RATE) + field(2, SAMPLE_BITS) + field(3, MICROPHONE_CHANNELS)
     microphone = field(1, MICROPHONE_CHANNEL) + field(5, field(1, STREAM_AUDIO) + field(2, microphone_config))
     sensors = field(1, SENSOR_CHANNEL) + field(2, b"".join(field(1, field(1, sensor)) for sensor in SENSORS))
-    channels = b"".join(field(1, channel) for channel in (video, touch, media, microphone, sensors))
+    channels = b"".join(field(1, channel) for channel in (video, touch, media, microphone, sensors, *pads))
     return channels + field(2, b"fakehu")
 
 
 class FakeHeadunit:
     def __init__(self, sock, cert, key, max_unacked=4, auto_ack=True, unsolicited_focus=False,
                  resolution=RESOLUTION_800X480, frame_rate=FPS_30, verify_phone=False, trusted_phone=None,
-                 keycodes=(HOME, BACK), hold_focus=False):
+                 keycodes=(HOME, BACK), hold_focus=False, touchpad=None, touchscreen=TOUCHSCREEN):
         """verify_phone: check the phone certificate like a strict car, against
         no trusted authority at all, so any certificate is rejected.
         trusted_phone: check it against this one certificate instead.
         keycodes: the android key codes the car says it has buttons for.
-        hold_focus: stay on the car's own screen until set_video_focus"""
-        self.sock, self.max_unacked, self.auto_ack = sock, max_unacked, auto_ack
-        self.keycodes, self.hold_focus = keycodes, hold_focus
+        hold_focus: stay on the car's own screen until set_video_focus.
+        touchpad: (width, height, keycodes) of a touchpad on a channel of its own.
+        touchscreen: its size, or None for a car driven by its buttons alone"""
+        self.sock, self.max_unacked, self.auto_ack, self.screen = sock, max_unacked, auto_ack, touchscreen
+        self.keycodes, self.hold_focus, self.pad = keycodes, hold_focus, touchpad
         self.unsolicited_focus, self.resolution, self.frame_rate = unsolicited_focus, resolution, frame_rate
         self.sock.settimeout(TIMEOUT)
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -206,7 +222,8 @@ class FakeHeadunit:
         control = channel == 0 or flags & FLAG_CONTROL
         if control and message_id == SERVICE_DISCOVERY_REQUEST:
             self.send(0, SERVICE_DISCOVERY_RESPONSE,
-                      service_discovery_response(self.resolution, self.frame_rate, self.keycodes))
+                      service_discovery_response(self.resolution, self.frame_rate, self.keycodes, self.pad,
+                                                 self.screen))
         elif control and message_id == CHANNEL_OPEN_REQUEST:
             self.send(channel, CHANNEL_OPEN_RESPONSE, field(1, 0), flags=FLAG_CONTROL)
         elif channel == VIDEO_CHANNEL and message_id == SETUP_REQUEST:
@@ -224,7 +241,7 @@ class FakeHeadunit:
             self.arrivals.append(time.monotonic())
             if self.auto_ack:
                 self.ack()
-        elif channel == INPUT_CHANNEL and message_id == BINDING_REQUEST:
+        elif channel in (INPUT_CHANNEL, TOUCHPAD_CHANNEL) and message_id == BINDING_REQUEST:
             self.send(channel, BINDING_RESPONSE, field(1, 0))
         elif channel == SENSOR_CHANNEL and message_id == SENSOR_START_REQUEST:
             self.sensors_started.append(dict(parse(body))[1])
@@ -289,7 +306,23 @@ class FakeHeadunit:
         event = locations + field(2, action_index) + field(3, action)
         self.send(INPUT_CHANNEL, INPUT_EVENT, field(1, time.monotonic_ns() // 1000) + field(3, event))
 
-    def button(self, keycode, pressed):
+    def touch_pad(self, action, points, action_index=0):
+        """a touch on the touchpad: the same event as a touchscreen's, in a field of its own"""
+        locations = b"".join(field(1, field(1, x) + field(2, y) + field(3, pointer)) for pointer, x, y in points)
+        event = locations + field(2, action_index) + field(3, action)
+        self.send(TOUCHPAD_CHANNEL, INPUT_EVENT, field(1, time.monotonic_ns() // 1000) + field(7, event))
+
+    def button(self, keycode, pressed, channel=INPUT_CHANNEL):
         """keycode is an android key code, as advertised in service discovery"""
         event = field(1, field(1, keycode) + field(2, int(pressed)))
-        self.send(INPUT_CHANNEL, INPUT_EVENT, field(1, time.monotonic_ns() // 1000) + field(4, event))
+        self.send(channel, INPUT_EVENT, field(1, time.monotonic_ns() // 1000) + field(4, event))
+
+    def turn(self, keycode, delta):
+        """a relative control, such as a rotary knob, moved by so many detents"""
+        event = field(1, field(1, keycode) + field(2, delta))
+        self.send(INPUT_CHANNEL, INPUT_EVENT, field(1, time.monotonic_ns() // 1000) + field(6, event))
+
+    def set_control(self, keycode, value):
+        """an absolute control, such as a slider, moved to a position"""
+        event = field(1, field(1, keycode) + field(2, value))
+        self.send(INPUT_CHANNEL, INPUT_EVENT, field(1, time.monotonic_ns() // 1000) + field(5, event))

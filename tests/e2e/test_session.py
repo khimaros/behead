@@ -53,6 +53,27 @@ GOOGLE_PAIR = (os.environ.get("BEHEAD_GOOGLE_CERT", ""), os.environ.get("BEHEAD_
 LIVE_CMD = ("ffmpeg -loglevel error -f lavfi -i testsrc2=size={width}x{height}:rate={fps},realtime "
             "-pix_fmt yuv420p -c:v libx264 -preset ultrafast -tune zerolatency -profile:v baseline -g {fps} -f h264 -")
 LIVE_FRAMES = 10
+# a message id no channel uses
+UNKNOWN_MESSAGE = 0x80F9
+# passes an annex-b stream on with only its first sps and pps, which is how a
+# hardware encoder such as the pi's writes one: no parameter sets at later
+# keyframes. x264 writes a picture at once, parameter sets first, so each
+# read holds them whole, and everything else passes without waiting
+HEADERS_ONCE = r"""
+import re, sys
+seen = set()
+def once(found):
+    kind = found.group(1)[0] & 0x1f
+    kept = b"" if kind in seen else found.group()
+    seen.add(kind)
+    return kept
+# an sps or pps, whatever its reference bits, up to the next start code of
+# either length
+PARAMETER_SET = re.compile(rb"\x00\x00\x01([\x07\x08\x27\x28\x47\x48\x67\x68]).*?(?=\x00{2,3}\x01)", re.S)
+while chunk := sys.stdin.buffer.read1(1 << 20):
+    sys.stdout.buffer.write(PARAMETER_SET.sub(once, chunk))
+    sys.stdout.buffer.flush()
+"""
 DEMO_WARMUP_FRAMES = 10
 DEMO_SETTLE_FRAMES = 10
 DEMO_TOUCH = (600, 300)
@@ -273,6 +294,19 @@ class SessionTest(unittest.TestCase):
         self.assertEqual(starts.read_text().count("started"), 1)
         self.assert_decodes(second.config[0], second.frames)
 
+    def test_resumes_a_stream_whose_parameter_sets_came_only_once(self):
+        """a hardware encoder writes its parameter sets at the start and
+        never again, so a car that connects later gets them from the server"""
+        script = self.dir / "headers_once.py"
+        script.write_text(HEADERS_ONCE)
+        self.restart_server(f"{LIVE_CMD} | python3 {script}")
+        first = self.connect()
+        first.run_until(lambda: len(first.frames) >= LIVE_FRAMES)
+        first.sock.close()
+        second = self.connect()
+        second.run_until(lambda: len(second.frames) >= LIVE_FRAMES)
+        self.assert_decodes(second.config[0], second.frames)
+
     def test_restarts_the_video_command_for_a_new_mode(self):
         starts = self.start_live_server()
         first = self.connect()
@@ -318,6 +352,74 @@ class SessionTest(unittest.TestCase):
                     b"touch pointer-up 1 0:123,456 1:310,210\n"
                     b"touch up 0 0:123,456\n")
         self.assertEqual(self.read_output(self.server.stdout, b"touch up"), expected)
+
+    def test_reports_a_rotary_knob(self):
+        """a knob turns as relative events, either way, tilts as the dpad and
+        clicks as its centre. a slider reports the position it was moved to"""
+        headunit = self.connect(keycodes=(fakehu.ROTARY, fakehu.DPAD_LEFT, fakehu.DPAD_CENTER))
+        headunit.run_until(lambda: headunit.received(fakehu.INPUT_CHANNEL, fakehu.BINDING_REQUEST))
+        headunit.turn(fakehu.ROTARY, 2)
+        headunit.turn(fakehu.ROTARY, -1)
+        headunit.button(fakehu.DPAD_LEFT, True)
+        headunit.button(fakehu.DPAD_LEFT, False)
+        headunit.set_control(fakehu.ROTARY, 40)
+        headunit.button(fakehu.DPAD_CENTER, True)
+        expected = (b"relative 65536 2\nrelative 65536 -1\nbutton 21 down\nbutton 21 up\n"
+                    b"absolute 65536 40\nbutton 23 down\n")
+        self.assertEqual(self.read_output(self.server.stdout, b"button 23 down"), expected)
+
+    def test_serves_a_car_without_a_touchscreen(self):
+        """a car driven by a knob and buttons alone gets its picture, and
+        what its controls send is heard"""
+        headunit = self.connect(touchscreen=None, keycodes=(fakehu.ROTARY, fakehu.DPAD_CENTER))
+        headunit.run_until(lambda: len(headunit.frames) == FRAME_COUNT)
+        self.assertIn(b"input channel 1: keys 65536 23\n", self.read_output(self.server.stderr, b"input channel"))
+        headunit.turn(fakehu.ROTARY, 1)
+        headunit.button(fakehu.DPAD_CENTER, True)
+        self.assertEqual(self.read_output(self.server.stdout, b"button 23 down"),
+                         b"relative 65536 1\nbutton 23 down\n")
+
+    def test_reports_a_touchpad_on_a_channel_of_its_own(self):
+        """a car's touchpad, such as the pads on a steering wheel, can be an
+        input service beside the touchscreen's, with keys of its own. both
+        are bound, and both are heard"""
+        headunit = self.connect(touchpad=(1000, 600, (fakehu.DPAD_UP,)))
+        for channel, keys in ((fakehu.INPUT_CHANNEL, (3, 4)), (fakehu.TOUCHPAD_CHANNEL, (fakehu.DPAD_UP,))):
+            headunit.run_until(lambda: headunit.received(channel, fakehu.BINDING_REQUEST))
+            asked = b"".join(fakehu.field(1, key) for key in keys)
+            self.assertEqual(headunit.received(channel, fakehu.BINDING_REQUEST), [asked])
+        headunit.touch_pad(fakehu.TOUCH_DOWN, [(0, 10, 20)])
+        headunit.touch_pad(fakehu.TOUCH_MOVED, [(0, 400, 20)])
+        headunit.touch_pad(fakehu.TOUCH_UP, [(0, 400, 20)])
+        headunit.button(fakehu.DPAD_UP, True, channel=fakehu.TOUCHPAD_CHANNEL)
+        headunit.touch(fakehu.TOUCH_DOWN, [(0, 1, 2)])
+        expected = (b"touchpad down 0 0:10,20\ntouchpad move 0 0:400,20\ntouchpad up 0 0:400,20\n"
+                    b"button 19 down\ntouch down 0 0:1,2\n")
+        self.assertEqual(self.read_output(self.server.stdout, b"touch down"), expected)
+        log = self.read_output(self.server.stderr, b"touchpad 1000x600")
+        self.assertIn(f"input channel {fakehu.TOUCHPAD_CHANNEL}: keys 19, touchpad 1000x600\n".encode(), log)
+        self.assertIn(f"input channel {fakehu.INPUT_CHANNEL}: keys 3 4, touchscreen 800x480\n".encode(), log)
+
+    def test_reports_what_it_has_no_name_for(self):
+        """a car sends more than is known here. whatever arrives unread comes
+        out with its bytes, so a control that does nothing can be looked into:
+        a field of an input or sensor event, or a whole message"""
+        headunit = self.connect()
+        headunit.run_until(lambda: headunit.received(fakehu.INPUT_CHANNEL, fakehu.BINDING_REQUEST))
+        stamp = fakehu.field(1, 5)
+        headunit.send(fakehu.INPUT_CHANNEL, fakehu.INPUT_EVENT,
+                      stamp + fakehu.field(9, b"\x01\x02") + fakehu.field(12, 7))
+        headunit.send(fakehu.SENSOR_CHANNEL, fakehu.SENSOR_EVENT, fakehu.field(21, b"\x08\x01"))
+        headunit.send(fakehu.INPUT_CHANNEL, UNKNOWN_MESSAGE, b"\xab\xcd")
+        headunit.button(fakehu.HOME, True)
+        expected = (f"unknown input {fakehu.INPUT_CHANNEL} field 9 0102\n"
+                    f"unknown input {fakehu.INPUT_CHANNEL} field 12 07\n"
+                    f"unknown sensor {fakehu.SENSOR_CHANNEL} field 21 0801\n"
+                    f"unknown message {fakehu.INPUT_CHANNEL} {UNKNOWN_MESSAGE:#06x} abcd\n"
+                    "button 3 down\n").encode()
+        printed = self.read_output(self.server.stdout, b"button 3 down")
+        self.assertEqual(b"".join(line for line in printed.splitlines(True) if b"unknown" in line or b"button" in line),
+                         expected)
 
     def test_reports_sensor_readings(self):
         """the car's sensors, each asked for, come out as lines in plain
@@ -574,6 +676,13 @@ class SessionTest(unittest.TestCase):
                                 capture_output=True, timeout=fakehu.TIMEOUT)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(b"no key for", result.stderr)
+
+    def test_refuses_a_knob_it_has_no_keys_for(self):
+        result = subprocess.run([SERVER, *self.TRANSPORT_ARGS, "--cert", self.phone[0], "--key", self.phone[1],
+                                 "--video-cmd", "true", "--knob", "sideways"],
+                                capture_output=True, timeout=fakehu.TIMEOUT)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"--knob takes focus or arrows, not sideways", result.stderr)
 
     def test_streams_media_audio(self):
         self.restart_server(options=["--audio-cmd", TONE_CMD])

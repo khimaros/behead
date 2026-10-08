@@ -90,10 +90,25 @@ pub enum Event {
     /// readings from the headunit's sensors
     Sensors(proto::SensorEvent),
     Shutdown,
+    /// a message nothing here reads, kept whole for whoever looks into it
     Unhandled {
         channel: u8,
         id: u16,
+        body: Vec<u8>,
     },
+    /// a field of an input or sensor event that has no name here
+    UnknownField {
+        channel: u8,
+        kind: &'static str,
+        field: u32,
+        value: Vec<u8>,
+    },
+}
+
+/// the fields of an event the decoder passed over, as events of their own
+fn unknown_fields(channel: u8, kind: &'static str, body: &[u8], known: &[u32]) -> impl Iterator<Item = Event> {
+    let unread = proto::unknown_fields(body, known).into_iter();
+    unread.map(move |(field, value)| Event::UnknownField { channel, kind, field, value })
 }
 
 /// what video and media audio share: setup, focus and the ack window. the
@@ -179,7 +194,9 @@ pub struct Session<T: Tls> {
     video: Option<Video>,
     media: Option<Audio>,
     microphone: Option<Microphone>,
-    input: Option<Input>,
+    /// every input service the headunit offers: a touchpad or a set of
+    /// buttons can be one of its own beside the touchscreen's
+    inputs: Vec<Input>,
     sensors: Option<Sensors>,
 }
 
@@ -216,7 +233,7 @@ impl<T: Tls> Session<T> {
             video: None,
             media: None,
             microphone: None,
-            input: None,
+            inputs: Vec::new(),
             sensors: None,
         }
     }
@@ -344,18 +361,22 @@ impl<T: Tls> Session<T> {
         }
         if self.sensors.as_ref().is_some_and(|s| s.channel == channel) {
             match id {
-                sensor::EVENT => events.push(Event::Sensors(decode(body)?)),
+                sensor::EVENT => {
+                    events.push(Event::Sensors(decode(body)?));
+                    events.extend(unknown_fields(channel, "sensor", body, proto::SENSOR_EVENT_FIELDS));
+                }
                 sensor::START_RESPONSE => {}
-                _ => events.push(Event::Unhandled { channel, id }),
+                _ => events.push(Event::Unhandled { channel, id, body: body.to_vec() }),
             }
             return Ok(());
         }
         match id {
-            input::EVENT if self.input.as_ref().is_some_and(|i| i.channel == channel) => {
-                events.push(Event::Input(decode(body)?))
+            input::EVENT if self.inputs.iter().any(|i| i.channel == channel) => {
+                events.push(Event::Input(decode(body)?));
+                events.extend(unknown_fields(channel, "input", body, proto::INPUT_EVENT_FIELDS));
             }
             input::BINDING_RESPONSE => {}
-            _ => events.push(Event::Unhandled { channel, id }),
+            _ => events.push(Event::Unhandled { channel, id, body: body.to_vec() }),
         }
         Ok(())
     }
@@ -402,7 +423,7 @@ impl<T: Tls> Session<T> {
                     self.sync_media(events)?;
                 }
             }
-            _ => events.push(Event::Unhandled { channel, id }),
+            _ => events.push(Event::Unhandled { channel, id, body: body.to_vec() }),
         }
         Ok(())
     }
@@ -422,7 +443,7 @@ impl<T: Tls> Session<T> {
                 let flow = Flow { channel, ..Flow::default() };
                 self.media = Some(Audio { flow, configs: av.audio_configs.clone() });
             } else if let Some(input) = &descriptor.input_channel {
-                self.input = Some(Input { channel, keycodes: input.supported_keycodes.clone() });
+                self.inputs.push(Input { channel, keycodes: input.supported_keycodes.clone() });
             } else if let Some(source) =
                 descriptor.av_input_channel.as_ref().filter(|_| self.options.microphone && self.microphone.is_none())
             {
@@ -452,7 +473,7 @@ impl<T: Tls> Session<T> {
             self.send_proto(channel, 0, av::SETUP_REQUEST, &request)?;
         } else if audio {
             self.send_proto(channel, 0, av::SETUP_REQUEST, &proto::AvSetupRequest { codec: Some(proto::CODEC_PCM) })?;
-        } else if let Some(keycodes) = self.input.as_ref().filter(|i| i.channel == channel).map(|i| &i.keycodes) {
+        } else if let Some(keycodes) = self.inputs.iter().find(|i| i.channel == channel).map(|i| &i.keycodes) {
             let request = proto::BindingRequest { scan_codes: keycodes.iter().map(|&k| k as i32).collect() };
             self.send_proto(channel, 0, input::BINDING_REQUEST, &request)?;
         } else if let Some(types) = self.sensors.as_ref().filter(|s| s.channel == channel).map(|s| s.types.clone()) {
@@ -483,7 +504,7 @@ impl<T: Tls> Session<T> {
             }
             av::MEDIA_ACK => return video.flow.acked(body),
             _ => {
-                events.push(Event::Unhandled { channel: video.flow.channel, id });
+                events.push(Event::Unhandled { channel: video.flow.channel, id, body: body.to_vec() });
                 return Ok(());
             }
         }
@@ -522,7 +543,7 @@ impl<T: Tls> Session<T> {
             }
             av::MEDIA_ACK => media.flow.acked(body),
             _ => {
-                events.push(Event::Unhandled { channel: media.flow.channel, id });
+                events.push(Event::Unhandled { channel: media.flow.channel, id, body: body.to_vec() });
                 Ok(())
             }
         }
@@ -573,7 +594,7 @@ impl<T: Tls> Session<T> {
                 events.push(Event::Microphone(pcm.to_vec()));
                 self.send_proto(channel, 0, av::MEDIA_ACK, &proto::AvMediaAck { session: Some(0), value: Some(1) })?;
             }
-            _ => events.push(Event::Unhandled { channel, id }),
+            _ => events.push(Event::Unhandled { channel, id, body: body.to_vec() }),
         }
         Ok(())
     }

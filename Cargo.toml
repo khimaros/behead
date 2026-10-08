@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
-members = ["crates/aap", "crates/server", "crates/demo"]
+members = ["crates/aap", "crates/link", "crates/server", "crates/demo"]
+# the firmware has a target and a toolchain of its own (see esp32/README.md)
+exclude = ["esp32"]
 
 [workspace.package]
 version = "0.1.0"

@@ -3,6 +3,10 @@
 //! through the android open accessory requests, as an accessory with two
 //! bulk endpoints carrying the session.
 
+use aap::accessory::{
+    self, function_descriptors, Reply, ACCESSORY_ID, FULL_SPEED_PACKET, HIGH_SPEED_PACKET, INITIAL_ID, INTERFACE_NAME,
+    MANUFACTURER, PRODUCT, SERIAL, UNPLUG_GRACE_MS,
+};
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -22,20 +26,9 @@ const FFS_MOUNT: &str = "/run/behead-ffs";
 const UDC_CLASS: &str = "/sys/class/udc";
 const MODULES: [&str; 2] = ["libcomposite", "usb_f_fs"];
 
-const MANUFACTURER: &str = "khimaros";
-const PRODUCT: &str = "behead";
-const SERIAL: &str = "0001";
-const INTERFACE_NAME: &[u8] = b"Android Accessory Interface\0";
 const LANG_EN_US: u16 = 0x0409;
-
-/// ids shown before the switch (the ones AACS uses) and google's accessory ids after
-const INITIAL_ID: (u16, u16) = (0x12d1, 0x107e);
-const ACCESSORY_ID: (u16, u16) = (0x18d1, 0x2d00);
-
-const AOA_GET_PROTOCOL: u8 = 51;
-const AOA_SEND_STRING: u8 = 52;
-const AOA_START: u8 = 53;
-const AOA_PROTOCOL_VERSION: u16 = 2;
+const USB_DIR_IN: u8 = 0x80;
+const SETUP_LENGTH: usize = 8;
 
 const FFS_DESCRIPTORS_MAGIC_V2: u32 = 3;
 const FFS_STRINGS_MAGIC: u32 = 2;
@@ -44,24 +37,14 @@ const FFS_HAS_HS_DESC: u32 = 2;
 /// deliver device-recipient control requests to us, which the accessory requests are
 const FFS_ALL_CTRL_RECIP: u32 = 64;
 const FFS_EVENT_LEN: usize = 12;
-/// time to wait after a disable for the host to enable the device again
-/// before treating it as unplugged
-const UNPLUG_GRACE_MS: i32 = 2000;
 const FFS_EVENT_BATCH: usize = 4;
 const EVENT_UNBIND: u8 = 1;
 const EVENT_ENABLE: u8 = 2;
 const EVENT_DISABLE: u8 = 3;
 const EVENT_SETUP: u8 = 4;
 
-const USB_DIR_IN: u8 = 0x80;
-const DT_INTERFACE: u8 = 4;
-const DT_ENDPOINT: u8 = 5;
-const CLASS_VENDOR: u8 = 0xff;
-const XFER_BULK: u8 = 2;
-const FULL_SPEED_PACKET: u16 = 64;
 /// how /sys/class/udc/*/current_speed names a full speed link
 const FULL_SPEED: &str = "full-speed";
-const HIGH_SPEED_PACKET: u16 = 512;
 const DESCRIPTORS_PER_SPEED: u32 = 3;
 
 fn context<T>(result: std::io::Result<T>, what: &str) -> Result<T, String> {
@@ -78,12 +61,6 @@ fn make_dir(dir: &str) -> Result<(), String> {
     context(fs::create_dir_all(&path), &format!("creating {}", path.display()))
 }
 
-/// one interface with a bulk in and a bulk out endpoint, at the given packet size
-fn speed_descriptors(packet: u16) -> Vec<u8> {
-    let endpoint = |address: u8| [&[7, DT_ENDPOINT, address, XFER_BULK][..], &packet.to_le_bytes(), &[0]].concat();
-    [vec![9, DT_INTERFACE, 0, 0, 2, CLASS_VENDOR, CLASS_VENDOR, 0, 1], endpoint(1 | USB_DIR_IN), endpoint(2)].concat()
-}
-
 fn with_header(magic: u32, words: &[u32], body: &[u8]) -> Vec<u8> {
     let length = (8 + words.len() * 4 + body.len()) as u32;
     let header: Vec<u8> = [magic, length].iter().chain(words).flat_map(|w| w.to_le_bytes()).collect();
@@ -92,12 +69,12 @@ fn with_header(magic: u32, words: &[u32], body: &[u8]) -> Vec<u8> {
 
 fn descriptors() -> Vec<u8> {
     let flags = FFS_HAS_FS_DESC | FFS_HAS_HS_DESC | FFS_ALL_CTRL_RECIP;
-    let body = [speed_descriptors(FULL_SPEED_PACKET), speed_descriptors(HIGH_SPEED_PACKET)].concat();
+    let body = [function_descriptors(FULL_SPEED_PACKET), function_descriptors(HIGH_SPEED_PACKET)].concat();
     with_header(FFS_DESCRIPTORS_MAGIC_V2, &[flags, DESCRIPTORS_PER_SPEED, DESCRIPTORS_PER_SPEED], &body)
 }
 
 fn strings() -> Vec<u8> {
-    with_header(FFS_STRINGS_MAGIC, &[1, 1], &[&LANG_EN_US.to_le_bytes(), INTERFACE_NAME].concat())
+    with_header(FFS_STRINGS_MAGIC, &[1, 1], &[&LANG_EN_US.to_le_bytes(), INTERFACE_NAME.as_bytes(), &[0]].concat())
 }
 
 fn mount_functionfs() -> Result<(), String> {
@@ -235,21 +212,18 @@ fn set_live(live: &Live, value: bool) {
 /// answer one control request. returns true when the headunit asked us to
 /// start accessory mode.
 fn on_setup(ep0: &mut File, setup: &[u8]) -> Result<bool, String> {
-    let (direction, request) = (setup[0] & USB_DIR_IN, setup[1]);
-    let length = u16::from_le_bytes([setup[6], setup[7]]) as usize;
-    match (request, direction) {
-        (AOA_GET_PROTOCOL, USB_DIR_IN) => {
-            context(ep0.write_all(&AOA_PROTOCOL_VERSION.to_le_bytes()), "answering protocol request")?;
-        }
-        (AOA_SEND_STRING | AOA_START, 0) => {
+    let reply = accessory::reply(&setup[..SETUP_LENGTH]);
+    match reply {
+        Reply::Send(version) => context(ep0.write_all(&version), "answering protocol request")?,
+        Reply::Receive(length) | Reply::Start(length) => {
             let mut data = vec![0; length];
             context(ep0.read(&mut data), "reading accessory request")?;
         }
         // functionfs stalls a request when asked for io in the wrong direction
-        (_, USB_DIR_IN) => drop(ep0.read(&mut [])),
-        _ => drop(ep0.write(&[])),
+        Reply::Stall if setup[0] & USB_DIR_IN != 0 => drop(ep0.read(&mut [])),
+        Reply::Stall => drop(ep0.write(&[])),
     }
-    Ok(request == AOA_START)
+    Ok(matches!(reply, Reply::Start(_)))
 }
 
 /// true once `file` has data to read, false if `timeout_ms` passes first
@@ -268,7 +242,7 @@ fn control_loop(mut ep0: File, udc: &str, live: &Live) -> Result<(), String> {
     let (mut accessory, mut unplugged) = (false, false);
     let mut events = [0; FFS_EVENT_LEN * FFS_EVENT_BATCH];
     loop {
-        if unplugged && !readable_within(&ep0, UNPLUG_GRACE_MS) {
+        if unplugged && !readable_within(&ep0, UNPLUG_GRACE_MS as i32) {
             (accessory, unplugged) = (false, false);
             enumerate(udc, INITIAL_ID)?;
             continue;

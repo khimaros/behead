@@ -21,9 +21,26 @@ this is what lets one core serve linux hosts and microcontrollers.
   derive so there is no build script and no protoc dependency
 - `session.rs`: the phone side state machine
 - `h264.rs`: annex-b access unit splitting
+- `text.rs`: input events as the text lines the README documents
+- `accessory.rs`: the android open accessory handshake: the ids, the
+  interface's descriptors, and what to answer each control request
+
+`crates/link` is one headunit connection for a host with threads: the
+session on a byte stream, a thread writing what the session queues, and the
+wait for room in the headunit's ack window. the host passes in the stream,
+the tls endpoint and a handler for session events.
 
 `crates/server` is the linux binary, `behead`. it owns the transport, the
 rustls endpoint, the encoder child process, and input delivery.
+
+`esp32` is the firmware for the esp32-p4, outside the workspace because it
+has a target and a toolchain of its own. it is the same three layers on
+other ground: `aap` and `crates/link` unchanged, tinyusb where linux has
+functionfs, mbedtls where linux has rustls (ring has no 32 bit risc-v
+support), and `crates/demo`'s drawing fed to the chip's h.264 encoder where
+linux pipes a command into x264. it uses esp-idf through `esp-idf-sys`,
+since the encoder's driver and the high speed usb port exist only there.
+it builds and has not run on a board (see esp32/README.md).
 
 ## session flow
 

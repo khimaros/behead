@@ -7,5 +7,6 @@ license.workspace = true
 
 [dependencies]
 aap = { path = "../aap" }
+behead-link = { path = "../link" }
 libc = "0.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

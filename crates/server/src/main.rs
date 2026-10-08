@@ -11,7 +11,8 @@ mod uinput;
 mod video;
 mod x509;
 
-use aap::{Event, Options, Session, VideoMode};
+use aap::{text, Event, Options, Session, VideoMode};
+use behead_link::send_when_ready;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read, Write};
@@ -19,8 +20,6 @@ use std::net::TcpListener;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::mpsc::{channel, Sender};
-use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 const USAGE: &str =
@@ -60,8 +59,6 @@ const TEARDOWN_COMMAND: &str = "teardown";
 const AUTO_UDC: &str = "auto";
 const CERT_EXTENSION: &str = "crt";
 const KEY_EXTENSION: &str = "key";
-/// how much of something a headunit sent that nothing here reads is shown
-const UNKNOWN_BYTES: usize = 32;
 const UNPAIRED_CERT: &str = "--cert needs a --key right after it";
 const READ_BUFFER: usize = 64 * 1024;
 /// pause between usb sessions, so a dying link is not retried in a tight loop
@@ -89,11 +86,9 @@ struct Config {
     nmea_socket: Option<PathBuf>,
 }
 
-/// session plus the queue feeding the transport writer, locked together so
-/// tls records reach the wire in the order they were encrypted.
-struct Link {
-    session: Session<tls::RustlsTls>,
-    outbox: Sender<Vec<u8>>,
+/// what this server keeps for one headunit connection
+#[derive(Default)]
+struct Host {
     /// bumped whenever the video stream stops, so stale encoder threads exit
     video_epoch: u64,
     /// the video command's stdin, which receives the same input lines as stdout
@@ -106,10 +101,10 @@ struct Link {
     microphone: Option<audio::Microphone>,
     /// the latest sensor line of each kind, by its first word
     readings: BTreeMap<String, String>,
-    closed: bool,
 }
 
-type Shared = Arc<(Mutex<Link>, Condvar)>;
+type Link = behead_link::Link<tls::RustlsTls, Host>;
+type Shared = behead_link::Shared<tls::RustlsTls, Host>;
 
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, String> {
     let (mut transport, mut credentials, mut cert, mut video_cmd, mut uinput) =
@@ -189,98 +184,6 @@ fn credential_files(credentials: &[Credential]) -> Result<Vec<(PathBuf, PathBuf)
     Ok(pairs)
 }
 
-/// hand pending session output to the writer thread
-fn flush(link: &mut Link) -> Result<(), String> {
-    let out = link.session.take_output();
-    if out.is_empty() {
-        return Ok(());
-    }
-    link.outbox.send(out).map_err(|_| "write: transport closed".to_string())
-}
-
-/// write queued output on a thread of its own. a usb gadget write blocks
-/// until the host collects it, so writing from the read loop would deadlock
-/// against a headunit that is itself waiting for us to read.
-fn spawn_writer(mut writer: impl Write + Send + 'static) -> Sender<Vec<u8>> {
-    let (outbox, queue) = channel::<Vec<u8>>();
-    std::thread::spawn(move || queue.iter().all(|out| writer.write_all(&out).is_ok()));
-    outbox
-}
-
-/// wait until the headunit's ack window has room, then send. returns false
-/// once the stream is over: the link closed, or live() no longer holds.
-fn send_when_ready(
-    shared: &Shared,
-    live: impl Fn(&Link) -> bool,
-    ready: impl Fn(&Link) -> bool,
-    send: impl FnOnce(&mut Link) -> Result<(), aap::Error>,
-) -> bool {
-    let (lock, condvar) = &**shared;
-    let live = |link: &Link| !link.closed && live(link);
-    let mut link = condvar.wait_while(lock.lock().unwrap(), |link| live(link) && !ready(link)).unwrap();
-    live(&link) && send(&mut link).is_ok() && flush(&mut link).is_ok()
-}
-
-/// the start of what a headunit sent, in hex, for an `unknown` line
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().take(UNKNOWN_BYTES).map(|byte| format!("{byte:02x}")).collect()
-}
-
-/// a touch on the touchscreen or a touchpad as a line: every finger down,
-/// and which of them the action is about
-fn touch_line(surface: &str, touch: &aap::proto::TouchEvent) -> String {
-    let action = match touch.touch_action.unwrap_or(-1) {
-        aap::proto::TOUCH_DOWN => "down".to_string(),
-        aap::proto::TOUCH_UP => "up".to_string(),
-        aap::proto::TOUCH_MOVED => "move".to_string(),
-        aap::proto::TOUCH_POINTER_DOWN => "pointer-down".to_string(),
-        aap::proto::TOUCH_POINTER_UP => "pointer-up".to_string(),
-        other => other.to_string(),
-    };
-    let points: Vec<String> = touch
-        .touch_location
-        .iter()
-        .map(|p| format!("{}:{},{}", p.pointer_id.unwrap_or(0), p.x.unwrap_or(0), p.y.unwrap_or(0)))
-        .collect();
-    format!("{surface} {action} {} {}", touch.action_index.unwrap_or(0), points.join(" "))
-}
-
-/// what a headunit's input services offer, one line each, for the log: a
-/// control that sends nothing is usually one the car never listed
-fn describe_inputs(info: &aap::proto::ServiceDiscoveryResponse) -> Vec<String> {
-    let size = |name: &str, config: &Option<aap::proto::TouchConfig>| {
-        config.as_ref().map(|c| format!(", {name} {}x{}", c.width.unwrap_or(0), c.height.unwrap_or(0)))
-    };
-    let inputs = info.channels.iter().filter_map(|c| Some((c.channel_id.unwrap_or(0), c.input_channel.as_ref()?)));
-    inputs
-        .map(|(channel, input)| {
-            let keys: Vec<String> = input.supported_keycodes.iter().map(u32::to_string).collect();
-            let keys = if keys.is_empty() { "no keys".to_string() } else { format!("keys {}", keys.join(" ")) };
-            let screen = size("touchscreen", &input.touch_screen_config).unwrap_or_default();
-            let pad = size("touchpad", &input.touch_pad_config).unwrap_or_default();
-            format!("input channel {channel}: {keys}{screen}{pad}")
-        })
-        .collect()
-}
-
-/// one text line per touch, button or control event, in the format the README documents
-fn input_lines(event: &aap::proto::InputEvent) -> Vec<String> {
-    let surfaces = [("touch", &event.touch_event), ("touchpad", &event.touchpad_event)];
-    let mut lines: Vec<String> =
-        surfaces.iter().filter_map(|(surface, touch)| Some(touch_line(surface, touch.as_ref()?))).collect();
-    for button in event.button_event.iter().flat_map(|b| &b.button_events) {
-        let state = if button.is_pressed.unwrap_or(false) { "down" } else { "up" };
-        lines.push(format!("button {} {state}", button.scan_code.unwrap_or(0)));
-    }
-    for control in event.absolute_event.iter().flat_map(|a| &a.absolute_events) {
-        lines.push(format!("absolute {} {}", control.scan_code.unwrap_or(0), control.value.unwrap_or(0)));
-    }
-    for control in event.relative_event.iter().flat_map(|r| &r.relative_events) {
-        lines.push(format!("relative {} {}", control.scan_code.unwrap_or(0), control.delta.unwrap_or(0)));
-    }
-    lines
-}
-
 /// kernel input devices matching the headunit's input services: the keys of
 /// all of them, and the first touchscreen. a failure is logged rather than
 /// fatal, since input still reaches stdout
@@ -295,45 +198,45 @@ fn create_input_devices(info: &aap::proto::ServiceDiscoveryResponse, knob: uinpu
 }
 
 /// print input to stdout, inject it with --uinput, and hand it to the video command
-fn deliver_input(link: &mut Link, event: &aap::proto::InputEvent) {
-    if let Some(Err(e)) = link.input_devices.as_mut().map(|devices| devices.deliver(event)) {
+fn deliver_input(host: &mut Host, event: &aap::proto::InputEvent) {
+    if let Some(Err(e)) = host.input_devices.as_mut().map(|devices| devices.deliver(event)) {
         eprintln!("{e}");
     }
-    deliver_lines(link, input_lines(event));
+    deliver_lines(host, text::input_lines(event));
 }
 
 /// hand one line to the video command, if it is running
-fn write_to_video(link: &mut Link, line: &str) {
-    let Some(input) = link.video_input.as_mut() else { return };
+fn write_to_video(host: &mut Host, line: &str) {
+    let Some(input) = host.video_input.as_mut() else { return };
     // lines are far below PIPE_BUF, so each write is all or nothing
     match input.write(format!("{line}\n").as_bytes()) {
-        Err(e) if e.kind() != std::io::ErrorKind::WouldBlock => link.video_input = None,
+        Err(e) if e.kind() != std::io::ErrorKind::WouldBlock => host.video_input = None,
         _ => {}
     }
 }
 
 /// print input and sensor lines to stdout and hand them to the video command
-fn deliver_lines(link: &mut Link, lines: Vec<String>) {
+fn deliver_lines(host: &mut Host, lines: Vec<String>) {
     for line in lines {
         println!("{line}");
-        write_to_video(link, &line);
+        write_to_video(host, &line);
     }
 }
 
 /// deliver sensor lines, and keep the latest of each kind for a video
 /// command that starts later: a headunit reports a state such as night mode
 /// once, when asked, which is before it shows the phone
-fn deliver_readings(link: &mut Link, lines: Vec<String>) {
+fn deliver_readings(host: &mut Host, lines: Vec<String>) {
     for line in &lines {
         let kind = line.split(' ').next().unwrap_or_default().to_string();
-        link.readings.insert(kind, line.clone());
+        host.readings.insert(kind, line.clone());
     }
-    deliver_lines(link, lines);
+    deliver_lines(host, lines);
 }
 
 /// show the video command's pictures on this link, starting the command
 /// unless the one already running serves this mode
-fn start_video(shared: &Shared, link: &mut Link, config: &Config, video: &mut Option<video::Source>, mode: VideoMode) {
+fn start_video(shared: &Shared, host: &mut Host, config: &Config, video: &mut Option<video::Source>, mode: VideoMode) {
     if !video.as_ref().is_some_and(|source| source.serves(mode)) {
         let values = [("width", mode.width), ("height", mode.height), ("fps", mode.fps)];
         let command = command::fill(&config.video_cmd, &values);
@@ -341,62 +244,62 @@ fn start_video(shared: &Shared, link: &mut Link, config: &Config, video: &mut Op
         *video = None;
         *video = video::Source::start(&command, mode).inspect_err(|e| eprintln!("{e}")).ok();
     }
-    link.video_input = video.as_ref().and_then(|source| source.attach(shared.clone(), link.video_epoch));
-    for line in link.readings.clone().into_values() {
-        write_to_video(link, &line);
+    host.video_input = video.as_ref().and_then(|source| source.attach(shared.clone(), host.video_epoch));
+    for line in host.readings.clone().into_values() {
+        write_to_video(host, &line);
     }
 }
 
 /// act on session events. returns false when the headunit asked to shut down.
-fn handle(shared: &Shared, link: &mut Link, config: &Config, video: &mut Option<video::Source>, event: Event) -> bool {
+fn handle(shared: &Shared, host: &mut Host, config: &Config, video: &mut Option<video::Source>, event: Event) -> bool {
     match event {
         Event::Authenticated => eprintln!("headunit authenticated"),
         Event::Discovered(info) => {
             eprintln!("headunit offers {} channels", info.channels.len());
-            describe_inputs(&info).iter().for_each(|line| eprintln!("{line}"));
+            text::describe_inputs(&info).iter().for_each(|line| eprintln!("{line}"));
             if config.uinput {
-                link.input_devices = create_input_devices(&info, config.knob);
+                host.input_devices = create_input_devices(&info, config.knob);
             }
         }
         Event::VideoStarted(mode) => {
             eprintln!("video started {}x{}@{}", mode.width, mode.height, mode.fps);
-            start_video(shared, link, config, video, mode);
+            start_video(shared, host, config, video, mode);
         }
         Event::VideoStopped => {
-            link.video_epoch += 1;
-            link.video_input = None;
+            host.video_epoch += 1;
+            host.video_input = None;
             video.iter().for_each(video::Source::detach);
         }
         Event::AudioStarted(format) => {
             eprintln!("audio started {}hz {} bit {} channels", format.rate, format.bits, format.channels);
             let command = command::fill(config.audio_cmd.as_deref().unwrap_or_default(), &audio::values(format));
-            let (shared, epoch) = (shared.clone(), link.audio_epoch);
+            let (shared, epoch) = (shared.clone(), host.audio_epoch);
             let delay = config.audio_delay;
             std::thread::spawn(move || audio::stream(shared, epoch, command, format, delay));
         }
-        Event::AudioStopped => link.audio_epoch += 1,
+        Event::AudioStopped => host.audio_epoch += 1,
         Event::MicrophoneOpened(format) => {
             eprintln!("microphone open {}hz {} bit {} channels", format.rate, format.bits, format.channels);
             let command = command::fill(config.mic_cmd.as_deref().unwrap_or_default(), &audio::values(format));
-            link.microphone = audio::Microphone::start(&command);
+            host.microphone = audio::Microphone::start(&command);
         }
         Event::Microphone(pcm) => {
-            if let Some(microphone) = link.microphone.as_mut() {
+            if let Some(microphone) = host.microphone.as_mut() {
                 microphone.write(&pcm);
             }
         }
-        Event::Input(input) => deliver_input(link, &input),
+        Event::Input(input) => deliver_input(host, &input),
         Event::Sensors(readings) => {
             readings.location.iter().for_each(nmea::publish);
-            deliver_readings(link, sensors::lines(&readings));
+            deliver_readings(host, sensors::lines(&readings));
         }
         Event::Unhandled { channel, id, body } => {
             eprintln!("unhandled message {id:#06x} on channel {channel}");
-            deliver_lines(link, vec![format!("unknown message {channel} {id:#06x} {}", hex(&body))]);
+            deliver_lines(host, vec![text::unknown_message(channel, id, &body)]);
         }
         Event::UnknownField { channel, kind, field, value } => {
             eprintln!("unknown field {field} in a {kind} event on channel {channel}");
-            deliver_lines(link, vec![format!("unknown {kind} {channel} field {field} {}", hex(&value))]);
+            deliver_lines(host, vec![text::unknown_field(kind, channel, field, &value)]);
         }
         Event::Shutdown => return false,
     }
@@ -407,7 +310,7 @@ fn handle(shared: &Shared, link: &mut Link, config: &Config, video: &mut Option<
 /// certificate if the headunit refused the one presented. the video command
 /// outlives the connection
 fn serve(
-    mut reader: impl Read,
+    reader: impl Read,
     writer: impl Write + Send + 'static,
     config: &Config,
     credentials: &mut tls::Credentials,
@@ -415,51 +318,18 @@ fn serve(
 ) -> Result<(), String> {
     let options = Options { media_audio: config.audio_cmd.is_some(), microphone: config.mic_cmd.is_some() };
     let session = Session::new(credentials.endpoint()?, options);
-    let outbox = spawn_writer(writer);
-    let link = Link {
-        session,
-        outbox,
-        video_epoch: 0,
-        audio_epoch: 0,
-        video_input: None,
-        input_devices: None,
-        microphone: None,
-        readings: BTreeMap::new(),
-        closed: false,
-    };
-    let shared: Shared = Arc::new((Mutex::new(link), Condvar::new()));
-    let mut buffer = vec![0; READ_BUFFER];
-    let result = loop {
-        let n = match reader.read(&mut buffer) {
-            Ok(0) => break Ok(()),
-            Ok(n) => n,
-            Err(e) => break Err(format!("read: {e}")),
-        };
-        let mut link = shared.0.lock().unwrap();
-        let events = match link.session.receive(&buffer[..n]) {
-            Ok(events) => events,
-            Err(e) => break Err(format!("session: {e:?}")),
-        };
-        let running = events.into_iter().all(|event| handle(&shared, &mut link, config, video, event));
-        if let Err(e) = flush(&mut link) {
-            break Err(e);
-        }
-        shared.1.notify_all();
-        if !running {
-            break Ok(());
-        }
-    };
+    let shared: Shared = behead_link::open(session, writer, Host::default());
+    let result =
+        behead_link::serve(&shared, reader, |link, event| handle(&shared, &mut link.host, config, video, event));
     let mut link = shared.0.lock().unwrap();
-    link.closed = true;
     // encoder threads may hold the link a while longer; the devices and the
     // microphone command go now
-    link.input_devices = None;
-    link.microphone = None;
+    link.host.input_devices = None;
+    link.host.microphone = None;
     video.iter().for_each(video::Source::detach);
     if link.session.tls().refused() {
         credentials.advance();
     }
-    shared.1.notify_all();
     result
 }
 

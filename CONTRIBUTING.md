@@ -25,10 +25,18 @@ need `openssl`, `ffmpeg` with libx264, and `ffprobe` on the path.
 ## layout
 
 - `crates/aap`: protocol core. keep it `no_std` and free of io.
+- `crates/link`: a headunit connection with threads and nothing else of its
+  host, shared by the linux server and the firmware. keep it free of
+  dependencies beyond `aap`.
 - `crates/server`: linux binary
-- `crates/demo`: `behead-demo`, the interactive demo video source. keep it
-  free of dependencies beyond `libc`, which the wayland client needs for
-  file descriptor passing and the server already uses.
+- `crates/demo`: `behead-demo`, the interactive demo video source, and the
+  library with what it draws, which the firmware uses too. keep it free of
+  dependencies beyond `libc`, which the wayland client needs for file
+  descriptor passing and the server already uses.
+- `esp32`: firmware for the esp32-p4. not a workspace member: `make
+  build-esp32` builds it with espressif's toolchain, and `make precommit`
+  does not cover it. code that can be tested on linux belongs in the
+  crates above, since nothing in here can be.
 - `sessions`: video commands that run a desktop session on the headunit.
   one that `make rpi-image SESSION=` and `make demo SESSION=` can choose is
   `NAME.sh {width} {height} {fps}`, listed in `SESSION_NAMES` in the

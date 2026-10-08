@@ -4,9 +4,11 @@
 
 extern crate alloc;
 
+pub mod accessory;
 pub mod frame;
 pub mod h264;
 pub mod proto;
 pub mod session;
+pub mod text;
 
 pub use session::{AudioFormat, Error, Event, Options, Session, Tls, VideoMode};

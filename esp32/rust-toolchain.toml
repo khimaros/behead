@@ -1,0 +1,3 @@
+# espressif's rust, installed by espup: build-std needs a nightly compiler
+[toolchain]
+channel = "esp"

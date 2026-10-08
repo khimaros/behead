@@ -38,7 +38,7 @@ pub fn stream(shared: Shared, epoch: u64, command: String, format: AudioFormat, 
         while held.front().is_some_and(|(read, _)| read.elapsed() >= delay) {
             let (_, pcm) = held.pop_front().unwrap();
             let timestamp = frames * MICROS_PER_SECOND / format.rate.max(1) as u64;
-            let live = |link: &crate::Link| link.audio_epoch == epoch;
+            let live = |link: &crate::Link| link.host.audio_epoch == epoch;
             let ready = |link: &crate::Link| link.session.audio_ready();
             if !send_when_ready(&shared, live, ready, |link| link.session.send_audio(timestamp, &pcm)) {
                 break 'stream;

@@ -1,0 +1,20 @@
+[build]
+target = "riscv32imafc-esp-espidf"
+
+[target.riscv32imafc-esp-espidf]
+linker = "ldproxy"
+runner = "espflash flash --monitor"
+rustflags = ["--cfg", "espidf_time64"]
+
+# the target has no prebuilt standard library
+[unstable]
+build-std = ["std", "panic_abort"]
+
+[env]
+MCU = "esp32p4"
+# esp-idf is fetched at this version into .embuild on the first build
+ESP_IDF_VERSION = "v5.4.1"
+# tinyusb's own build names the chip on the compiler's command line, which
+# the binding generator does not see. without it the headers look for
+# freertos in the wrong place
+BINDGEN_EXTRA_CLANG_ARGS = "-DCFG_TUSB_MCU=OPT_MCU_ESP32P4"

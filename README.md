@@ -398,6 +398,17 @@ gets the next pair on its following connection.
 the usb-c port also powers the pi. a headunit port may not supply what a pi 4
 needs under load; power it through the gpio header if it browns out.
 
+## esp32-p4
+
+`esp32` holds firmware that makes an esp32-p4 the phone, showing the demo
+through the chip's own h.264 encoder. it builds, and has not run on a board
+yet:
+
+    make build-esp32     # needs espressif's rust toolchain, from espup
+    make esp32-flash     # write it to a board on usb and show its log
+
+see [esp32/README.md](esp32/README.md) for what it needs and what it lacks.
+
 ## test
 
     make test-e2e    # tcp, no root

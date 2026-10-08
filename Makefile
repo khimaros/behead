@@ -55,11 +55,36 @@ RPI_TEST_DIR := tests/rpi
 PYUSB := pyusb==1.3.1
 RASPI_PROVISION ?= cargo run --quiet --release --manifest-path $(abspath ../raspi-provision/Cargo.toml) --
 
+ESP32_DIR := esp32
+ESP32_PHONE := $(ESP32_DIR)/certs/phone
+# the pair ../dexter takes out of the android auto app
+ESP32_CACHED := $(CERT_CACHE)/carservice
+
 .PHONY: build build-rpi test test-e2e test-e2e-rpi vm test-vm demo rpi-certs rpi-sessions rpi-image rpi-flash rpi-deploy \
-	test-rpi demo-rpi precommit clean
+	test-rpi demo-rpi esp32-certs build-esp32 esp32-flash precommit clean
 
 build:
 	cargo build
+
+# the one phone certificate the esp32-p4 firmware is built with: PHONE_CERT
+# and PHONE_KEY, else the pair in CERT_CACHE, else a self-signed one, which
+# openauto accepts and a stricter car may not
+esp32-certs:
+	mkdir -p $(dir $(ESP32_PHONE))
+	cert="$(or $(PHONE_CERT),$(wildcard $(ESP32_CACHED).crt))"; key="$(or $(PHONE_KEY),$(wildcard $(ESP32_CACHED).key))"; \
+	if [ -n "$$key" ]; then install -m 644 "$$cert" $(ESP32_PHONE).crt; install -m 600 "$$key" $(ESP32_PHONE).key; \
+	elif [ ! -f $(ESP32_PHONE).key ]; then openssl req -x509 -newkey rsa:2048 -nodes -days $(RPI_CERT_DAYS) \
+		-subj /O=behead-dev -keyout $(ESP32_PHONE).key -out $(ESP32_PHONE).crt; fi
+	openssl x509 -in $(ESP32_PHONE).crt -noout -subject -issuer -enddate
+
+# the firmware has its own toolchain and target (see esp32/README.md). the
+# first build fetches esp-idf, several gigabytes, into esp32/.embuild
+build-esp32: esp32-certs
+	cd $(ESP32_DIR) && cargo build --release
+
+# write the firmware to a board on usb and show what it logs
+esp32-flash: build-esp32
+	cd $(ESP32_DIR) && cargo run --release
 
 build-rpi:
 	rustup target add $(RPI_TARGET)

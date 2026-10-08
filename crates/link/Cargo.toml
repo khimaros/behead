@@ -1,0 +1,9 @@
+[package]
+name = "behead-link"
+description = "one headunit connection on a byte stream, for any host with threads"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+aap = { path = "../aap" }

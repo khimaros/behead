@@ -1,0 +1,38 @@
+[package]
+name = "behead-esp32"
+description = "android auto server for the esp32-p4"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+
+# built for another target with another toolchain, so not a member of the
+# workspace above
+[workspace]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+
+[profile.dev]
+# unoptimised code is too slow and too large for the chip
+opt-level = "s"
+
+[dependencies]
+aap = { path = "../crates/aap" }
+behead-demo = { path = "../crates/demo" }
+behead-link = { path = "../crates/link" }
+esp-idf-svc = "0.53"
+log = "0.4"
+
+# components from espressif's registry: the usb device stack, and the driver
+# for the chip's h.264 encoder
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "espressif/esp_tinyusb", version = "^1.7" }
+bindings_header = "components/bindings.h"
+
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "espressif/esp_h264", version = "^1.1" }
+
+[build-dependencies]
+embuild = "0.33"

@@ -1,0 +1,12 @@
+# the session, tls and the demo's drawing run on the main task
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=32768
+CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=16384
+
+# pictures and the encoder's buffers live in the psram
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_SPEED_200M=y
+
+# the phone side of android auto is a usb device with one vendor interface,
+# on the high speed port
+CONFIG_TINYUSB_VENDOR_COUNT=1
+CONFIG_TINYUSB_RHPORT_HS=y

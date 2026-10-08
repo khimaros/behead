@@ -119,7 +119,8 @@ fn forward(mut stdout: ChildStdout, target: &Mutex<Target>) {
         };
         for unit in units {
             let Some(((shared, epoch), unit)) = destination(target, unit) else { continue };
-            let (live, ready) = (|link: &Link| link.video_epoch == epoch, |link: &Link| link.session.video_ready());
+            let (live, ready) =
+                (|link: &Link| link.host.video_epoch == epoch, |link: &Link| link.session.video_ready());
             let timestamp = started.elapsed().as_micros() as u64;
             send_when_ready(&shared, live, ready, |link| link.session.send_video(timestamp, &unit));
         }

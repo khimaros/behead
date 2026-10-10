@@ -104,8 +104,11 @@ def input_channel(channel, keycodes, screen=None, pad=None):
 
 
 def service_discovery_response(resolution, frame_rate, keycodes, touchpad=None, touchscreen=TOUCHSCREEN):
-    video_config = field(1, resolution) + field(2, frame_rate) + field(3, 0) + field(4, 0) + field(5, 140)
-    video = field(1, VIDEO_CHANNEL) + field(3, field(1, 3) + field(4, video_config))
+    """resolution: one, or several for a car that offers a choice, the first being the one it asks for"""
+    resolutions = resolution if isinstance(resolution, (tuple, list)) else (resolution,)
+    video_configs = b"".join(field(4, field(1, offered) + field(2, frame_rate) + field(3, 0) + field(4, 0)
+                                       + field(5, 140)) for offered in resolutions)
+    video = field(1, VIDEO_CHANNEL) + field(3, field(1, 3) + video_configs)
     touch = input_channel(INPUT_CHANNEL, keycodes, screen=touchscreen)
     # a pad with keys of its own, as on a steering wheel, is a second input service
     pads = [input_channel(TOUCHPAD_CHANNEL, touchpad[2], pad=touchpad[:2])] if touchpad else []

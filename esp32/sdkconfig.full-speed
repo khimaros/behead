@@ -1,0 +1,4 @@
+# on top of sdkconfig.defaults, for ESP32_PORT=full: the usb device on the
+# chip's full speed controller, for a board whose high speed port has no
+# cable to a host
+CONFIG_TINYUSB_RHPORT_FS=y

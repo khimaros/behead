@@ -59,6 +59,11 @@ ESP32_DIR := esp32
 ESP32_PHONE := $(ESP32_DIR)/certs/phone
 # the pair ../dexter takes out of the android auto app
 ESP32_CACHED := $(CERT_CACHE)/carservice
+# the usb port the firmware is the phone on: high, the chip's high speed
+# port, or full, its full speed controller on the pins of its debug port
+ESP32_PORT ?= high
+ESP32_SDKCONFIG := sdkconfig.defaults$(if $(filter full,$(ESP32_PORT)),;sdkconfig.full-speed)
+ESP32_CARGO = cd $(ESP32_DIR) && ESP_IDF_SDKCONFIG_DEFAULTS="$(ESP32_SDKCONFIG)" cargo
 
 .PHONY: build build-rpi test test-e2e test-e2e-rpi vm test-vm demo rpi-certs rpi-sessions rpi-image rpi-flash rpi-deploy \
 	test-rpi demo-rpi esp32-certs build-esp32 esp32-flash precommit clean
@@ -80,11 +85,11 @@ esp32-certs:
 # the firmware has its own toolchain and target (see esp32/README.md). the
 # first build fetches esp-idf, several gigabytes, into esp32/.embuild
 build-esp32: esp32-certs
-	cd $(ESP32_DIR) && cargo build --release
+	$(ESP32_CARGO) build --release
 
 # write the firmware to a board on usb and show what it logs
 esp32-flash: build-esp32
-	cd $(ESP32_DIR) && cargo run --release
+	$(ESP32_CARGO) run --release
 
 build-rpi:
 	rustup target add $(RPI_TARGET)
@@ -238,5 +243,11 @@ precommit:
 	cargo clippy --all-targets -- -D warnings
 	$(MAKE) test test-e2e
 
+# the firmware is its own workspace, with esp-idf and its toolchain fetched
+# beside it. of the certificates, only the ones make put there go: a pair
+# dropped into the pi's by hand stays
 clean:
 	cargo clean
+	rm -rf $(ESP32_DIR)/target $(ESP32_DIR)/.embuild
+	rm -f $(ESP32_PHONE).crt $(ESP32_PHONE).key $(RPI_SELF_SIGNED).crt $(RPI_SELF_SIGNED).key \
+		$(RPI_PHONE).crt $(RPI_PHONE).key $(RPI_CACHED)*

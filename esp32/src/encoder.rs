@@ -1,14 +1,15 @@
 //! the chip's h.264 encoder, through espressif's esp_h264 component: one
-//! picture in, as packed yuv 4:2:0, one baseline access unit out.
+//! picture in, as packed yuv 4:2:0 in a buffer its dma can reach, one
+//! baseline access unit out.
 
 use aap::VideoMode;
-use behead_demo::Canvas;
 use esp_idf_svc::sys;
 
 /// the encoder works in macroblocks of this many pixels a side
 const MACROBLOCK: u32 = 16;
-/// what the encoder's dma wants its buffers aligned to
-const ALIGNMENT: u32 = 64;
+/// what the encoder's dma wants its buffers aligned to: a line of the cache
+/// in front of the psram (sdkconfig.defaults)
+const ALIGNMENT: u32 = 128;
 /// bits per pixel and second, in hundredths, as for the pi's encoder
 const CENTIBITS: u32 = 35;
 const QP_MIN: u8 = 20;
@@ -22,10 +23,13 @@ fn check(what: &str, status: sys::esp_h264_err_t) -> Result<(), String> {
 }
 
 /// a buffer the encoder's dma can reach, in the psram
-struct Buffer {
+pub struct Buffer {
     data: *mut u8,
     length: u32,
 }
+
+// SAFETY: the memory is the buffer's alone, and goes wherever the buffer does
+unsafe impl Send for Buffer {}
 
 impl Buffer {
     fn new(length: u32) -> Result<Self, String> {
@@ -37,7 +41,17 @@ impl Buffer {
             .ok_or(format!("encoder: no room for {length} bytes"))
     }
 
-    fn bytes(&mut self) -> &mut [u8] {
+    /// room for one picture of a mode as the encoder reads it, to draw in.
+    /// the encoder takes whole macroblocks, so 1080 lines, which are not,
+    /// would need the stream to say what to crop
+    pub fn yuv(mode: VideoMode) -> Result<Self, String> {
+        if !mode.width.is_multiple_of(MACROBLOCK) || !mode.height.is_multiple_of(MACROBLOCK) {
+            return Err(format!("encoder: {}x{} is not whole macroblocks", mode.width, mode.height));
+        }
+        Self::new(mode.width * mode.height * 3 / 2)
+    }
+
+    pub fn bytes(&mut self) -> &mut [u8] {
         // SAFETY: the allocation is `length` bytes, and owned by this buffer
         unsafe { std::slice::from_raw_parts_mut(self.data, self.length as usize) }
     }
@@ -52,7 +66,6 @@ impl Drop for Buffer {
 
 pub struct Encoder {
     handle: sys::esp_h264_enc_handle_t,
-    input: Buffer,
     output: Buffer,
 }
 
@@ -60,15 +73,9 @@ pub struct Encoder {
 unsafe impl Send for Encoder {}
 
 impl Encoder {
-    /// an encoder for one video mode, with a keyframe every second. the
-    /// encoder takes whole macroblocks, so 1080 lines, which are not, would
-    /// need the stream to say what to crop
+    /// an encoder for one video mode, with a keyframe every second
     pub fn new(mode: VideoMode) -> Result<Self, String> {
-        if mode.width % MACROBLOCK != 0 || mode.height % MACROBLOCK != 0 {
-            return Err(format!("encoder: {}x{} is not whole macroblocks", mode.width, mode.height));
-        }
-        let picture = mode.width * mode.height * 3 / 2;
-        let (input, output) = (Buffer::new(picture)?, Buffer::new(picture / OUTPUT_SHARE)?);
+        let output = Buffer::new(mode.width * mode.height * 3 / 2 / OUTPUT_SHARE)?;
         let config = sys::esp_h264_enc_cfg_hw_t {
             pic_type: sys::esp_h264_raw_format_t_ESP_H264_RAW_FMT_O_UYY_E_VYY,
             gop: mode.fps as u8,
@@ -86,15 +93,14 @@ impl Encoder {
             check("creating", sys::esp_h264_enc_hw_new(&config, &mut handle))?;
             check("opening", sys::esp_h264_enc_open(handle))?;
         }
-        Ok(Self { handle, input, output })
+        Ok(Self { handle, output })
     }
 
-    /// compress one picture, which has the mode's size. returns the access
-    /// unit, in annex-b, which lasts until the next call
-    pub fn encode(&mut self, canvas: &Canvas, timestamp_ms: u32) -> Result<&[u8], String> {
-        canvas.pack_yuv420(self.input.bytes());
+    /// compress one picture of the mode's size. returns the access unit, in
+    /// annex-b, which lasts until the next call
+    pub fn encode(&mut self, yuv: &Buffer, timestamp_ms: u32) -> Result<&[u8], String> {
         let mut input = sys::esp_h264_enc_in_frame_t {
-            raw_data: sys::esp_h264_pkt_t { buffer: self.input.data, len: self.input.length },
+            raw_data: sys::esp_h264_pkt_t { buffer: yuv.data, len: yuv.length },
             pts: timestamp_ms,
         };
         // SAFETY: plain data, valid when zeroed

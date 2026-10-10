@@ -69,6 +69,10 @@ touch. it runs on a raspberry pi 4, tested from a laptop over usb, and a
   service to read. a reader gets the latest fix when it connects and every
   one after. anyone who can reach the socket can read it; its directory,
   created if missing, decides who can
+- `--max-height`: the tallest picture to send, in lines. a headunit lists
+  the sizes it takes and asks for one of them; when that one is taller than
+  this, the server sends the largest listed that is not. a headunit that
+  lists none gets what it asked for
 
 in usb mode the server creates the kernel gadget on start and removes it on
 SIGINT or SIGTERM. if it was killed before it could, `behead teardown`
@@ -401,11 +405,13 @@ needs under load; power it through the gpio header if it browns out.
 ## esp32-p4
 
 `esp32` holds firmware that makes an esp32-p4 the phone, showing the demo
-through the chip's own h.264 encoder. it builds, and has not run on a board
-yet:
+through the chip's own h.264 encoder. it runs on a board, at up to
+1280x720 and 30 pictures a second, and has shown the demo in a van:
 
     make build-esp32     # needs espressif's rust toolchain, from espup
     make esp32-flash     # write it to a board on usb and show its log
+
+`ESP32_PORT=full` puts the phone on the chip's full speed usb port.
 
 see [esp32/README.md](esp32/README.md) for what it needs and what it lacks.
 

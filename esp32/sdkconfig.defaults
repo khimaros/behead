@@ -1,12 +1,29 @@
 # the session, tls and the demo's drawing run on the main task
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=32768
 CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=16384
+# a sleep shorter than a tick spins instead of yielding, and usb.rs polls
+# each millisecond
+CONFIG_FREERTOS_HZ=1000
 
-# pictures and the encoder's buffers live in the psram
+# the log goes to the uart alone. with a second console on the usb serial
+# port, what rust prints lands on a descriptor that is not the console
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# pictures and the encoder's buffers live in the psram. esp-idf counts its
+# full speed as experimental, and runs it at a tenth of that otherwise
 CONFIG_SPIRAM=y
+CONFIG_IDF_EXPERIMENTAL_FEATURES=y
 CONFIG_SPIRAM_SPEED_200M=y
+# a larger cache in front of it, in longer lines: filling an rgb picture
+# took 9 ms in place of 16. the largest, 512 KB, leaves the encoder no room
+CONFIG_CACHE_L2_CACHE_256KB=y
+CONFIG_CACHE_L2_CACHE_LINE_128B=y
 
 # the phone side of android auto is a usb device with one vendor interface,
 # on the high speed port
 CONFIG_TINYUSB_VENDOR_COUNT=1
 CONFIG_TINYUSB_RHPORT_HS=y
+# the controller's interrupts move the data, not its dma: with dma, video
+# going out 4 KB at a time while touches come in, records arrive corrupt
+# in both directions about every other minute. seen on the full speed port
+CONFIG_TINYUSB_MODE_SLAVE=y

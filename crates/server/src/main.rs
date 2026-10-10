@@ -25,7 +25,7 @@ use std::time::Duration;
 const USAGE: &str =
     "usage: behead (--cert FILE --key FILE | --cert-dir DIR)... --video-cmd CMD [--audio-cmd CMD] [--mic-cmd CMD]
               [--audio-delay MS] [--usb UDC | --listen ADDR] [--uinput] [--knob KEYS]
-              [--nmea-socket PATH]
+              [--nmea-socket PATH] [--max-height LINES]
        behead teardown
 
   --cert FILE      phone certificate, pem
@@ -52,6 +52,8 @@ const USAGE: &str =
                    down and up
   --nmea-socket PATH  offer the car's location as nmea sentences on a unix
                    socket, for a location service such as geoclue
+  --max-height LINES  when the headunit asks for a taller picture than this,
+                   send the largest it offers that is not, if there is one
 
   teardown         remove a usb gadget left behind by an earlier run";
 const DEFAULT_LISTEN: &str = "127.0.0.1:5277";
@@ -84,6 +86,7 @@ struct Config {
     uinput: bool,
     knob: uinput::Knob,
     nmea_socket: Option<PathBuf>,
+    max_height: Option<u32>,
 }
 
 /// what this server keeps for one headunit connection
@@ -110,7 +113,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, String> 
     let (mut transport, mut credentials, mut cert, mut video_cmd, mut uinput) =
         (Transport::Tcp(DEFAULT_LISTEN.into()), Vec::new(), None, None, false);
     let (mut audio_cmd, mut mic_cmd, mut nmea_socket, mut audio_delay) = (None, None, None, Duration::ZERO);
-    let mut knob = uinput::Knob::default();
+    let (mut knob, mut max_height) = (uinput::Knob::default(), None);
     while let Some(flag) = args.next() {
         if cert.is_some() && flag != "--key" {
             return Err(UNPAIRED_CERT.into());
@@ -142,6 +145,10 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, String> 
             "--knob" if value.is_empty() => {}
             "--knob" => knob = value.parse()?,
             "--nmea-socket" => nmea_socket = Some(PathBuf::from(value)),
+            "--max-height" if value.is_empty() => {}
+            "--max-height" => {
+                max_height = Some(value.parse().map_err(|_| format!("--max-height takes lines, not {value}"))?)
+            }
             _ => return Err(format!("unknown flag {flag}")),
         }
     }
@@ -152,7 +159,18 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, String> 
         return Err("--cert and --key, or --cert-dir, is required".into());
     }
     let video_cmd = video_cmd.ok_or("--video-cmd is required")?;
-    Ok(Config { transport, credentials, video_cmd, audio_cmd, audio_delay, mic_cmd, uinput, knob, nmea_socket })
+    Ok(Config {
+        transport,
+        credentials,
+        video_cmd,
+        audio_cmd,
+        audio_delay,
+        mic_cmd,
+        uinput,
+        knob,
+        nmea_socket,
+        max_height,
+    })
 }
 
 /// every certificate file in a directory with its key, in name order
@@ -316,7 +334,11 @@ fn serve(
     credentials: &mut tls::Credentials,
     video: &mut Option<video::Source>,
 ) -> Result<(), String> {
-    let options = Options { media_audio: config.audio_cmd.is_some(), microphone: config.mic_cmd.is_some() };
+    let options = Options {
+        media_audio: config.audio_cmd.is_some(),
+        microphone: config.mic_cmd.is_some(),
+        max_video_height: config.max_height,
+    };
     let session = Session::new(credentials.endpoint()?, options);
     let shared: Shared = behead_link::open(session, writer, Host::default());
     let result =

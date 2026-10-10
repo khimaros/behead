@@ -38,9 +38,12 @@ has a target and a toolchain of its own. it is the same three layers on
 other ground: `aap` and `crates/link` unchanged, tinyusb where linux has
 functionfs, mbedtls where linux has rustls (ring has no 32 bit risc-v
 support), and `crates/demo`'s drawing fed to the chip's h.264 encoder where
-linux pipes a command into x264. it uses esp-idf through `esp-idf-sys`,
-since the encoder's driver and the high speed usb port exist only there.
-it builds and has not run on a board (see esp32/README.md).
+linux pipes a command into x264. the demo draws on a `Surface`, which is
+rgb on linux and the encoder's packed yuv on the chip: making that yuv of
+an rgb picture, on the cpu or in the chip's pixel accelerator, took longer
+than drawing and encoding together. it uses esp-idf through `esp-idf-sys`, since the
+encoder's driver and the high speed usb port exist only there. it runs on
+a board over the chip's full speed port (see esp32/README.md).
 
 ## session flow
 

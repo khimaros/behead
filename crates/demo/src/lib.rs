@@ -3,8 +3,13 @@
 //! compositor, and the esp32 firmware to its h.264 encoder.
 
 mod font;
+mod packed;
+mod tone;
 
+pub use packed::Packed;
 use std::collections::{BTreeMap, VecDeque};
+use std::ops::Range;
+pub use tone::Tone;
 
 const BACKGROUND: [u8; 3] = [24, 28, 36];
 const TEXT: [u8; 3] = [230, 230, 230];
@@ -65,33 +70,21 @@ impl State {
     }
 }
 
-/// a picture as rgb24, top row first
-pub struct Canvas {
-    pub width: u32,
-    pub height: u32,
-    pub pixels: Vec<u8>,
+/// the part of a span that lies within a limit
+fn clip(start: i64, length: u32, limit: u32) -> Range<usize> {
+    start.clamp(0, limit as i64) as usize..(start + length as i64).clamp(0, limit as i64) as usize
 }
 
-impl Canvas {
-    pub fn new(width: u32, height: u32) -> Self {
-        Self { width, height, pixels: vec![0; (width * height * 3) as usize] }
-    }
+/// something the demo can draw on, in colours given as rgb, whatever it
+/// keeps its pixels as
+pub trait Surface {
+    /// width and height in pixels
+    fn size(&self) -> (u32, u32);
 
-    fn fill(&mut self, colour: [u8; 3]) {
-        self.pixels.chunks_exact_mut(3).for_each(|pixel| pixel.copy_from_slice(&colour));
-    }
+    fn fill(&mut self, colour: [u8; 3]);
 
-    /// a filled rectangle, clipped to the canvas
-    fn rect(&mut self, x: i64, y: i64, width: u32, height: u32, colour: [u8; 3]) {
-        let clip = |start: i64, length: u32, limit: u32| {
-            (start.clamp(0, limit as i64) as usize, (start + length as i64).clamp(0, limit as i64) as usize)
-        };
-        let ((left, right), (top, bottom)) = (clip(x, width, self.width), clip(y, height, self.height));
-        for row in top..bottom {
-            let start = (row * self.width as usize + left) * 3;
-            self.pixels[start..start + (right - left) * 3].chunks_exact_mut(3).for_each(|p| p.copy_from_slice(&colour));
-        }
-    }
+    /// a filled rectangle, clipped to the surface
+    fn rect(&mut self, x: i64, y: i64, width: u32, height: u32, colour: [u8; 3]);
 
     fn text(&mut self, x: i64, y: i64, scale: u32, colour: [u8; 3], text: &str) {
         for (index, c) in text.chars().enumerate() {
@@ -106,31 +99,36 @@ impl Canvas {
     }
 }
 
-/// bt.601 studio range, in 1/256ths: luma, and the two colour differences
-const LUMA: ([i32; 3], i32) = ([66, 129, 25], 16);
-const BLUE_DIFFERENCE: ([i32; 3], i32) = ([-38, -74, 112], 128);
-const RED_DIFFERENCE: ([i32; 3], i32) = ([112, -94, -18], 128);
-
-fn component(pixel: &[u8], (weights, offset): ([i32; 3], i32)) -> u8 {
-    let sum: i32 = pixel.iter().zip(weights).map(|(&value, weight)| value as i32 * weight).sum();
-    (((sum + 128) >> 8) + offset) as u8
+/// a picture as rgb24, top row first
+pub struct Canvas {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
 }
 
 impl Canvas {
-    /// the picture as the esp32-p4's h.264 encoder reads it: yuv 4:2:0 with
-    /// every pair of pixels as a colour byte and two of luma, the colour
-    /// being blue difference on the first row of each two and red difference
-    /// on the second. `out` holds three bytes for every two pixels, and the
-    /// width is even
-    pub fn pack_yuv420(&self, out: &mut [u8]) {
-        let row_bytes = self.width as usize * 3;
-        for (row, (pixels, packed)) in
-            self.pixels.chunks_exact(row_bytes).zip(out.chunks_exact_mut(row_bytes / 2)).enumerate()
-        {
-            let colour = if row % 2 == 0 { BLUE_DIFFERENCE } else { RED_DIFFERENCE };
-            for (pair, packed) in pixels.chunks_exact(6).zip(packed.chunks_exact_mut(3)) {
-                packed.copy_from_slice(&[component(pair, colour), component(pair, LUMA), component(&pair[3..], LUMA)]);
-            }
+    pub fn new(width: u32, height: u32) -> Self {
+        Self { width, height, pixels: vec![0; (width * height * 3) as usize] }
+    }
+}
+
+impl Surface for Canvas {
+    fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    /// a row at a time, from one made beside the picture, which is several
+    /// times as fast as a pixel at a time
+    fn fill(&mut self, colour: [u8; 3]) {
+        let row = colour.repeat(self.width as usize);
+        self.pixels.chunks_exact_mut(row.len().max(1)).for_each(|pixels| pixels.copy_from_slice(&row));
+    }
+
+    fn rect(&mut self, x: i64, y: i64, width: u32, height: u32, colour: [u8; 3]) {
+        let columns = clip(x, width, self.width);
+        for row in clip(y, height, self.height) {
+            let start = (row * self.width as usize + columns.start) * 3;
+            self.pixels[start..start + columns.len() * 3].chunks_exact_mut(3).for_each(|p| p.copy_from_slice(&colour));
         }
     }
 }
@@ -237,16 +235,17 @@ fn button_name(code: u32) -> &'static str {
 
 /// draw one frame: status text, a bar sweeping at a fixed speed so stutter
 /// shows, the trail of recent touches, and a marker under every finger
-pub fn render(canvas: &mut Canvas, state: &State, fps: u32, frame: u64) {
+pub fn render(canvas: &mut impl Surface, state: &State, fps: u32, frame: u64) {
+    let (width, height) = canvas.size();
     canvas.fill(BACKGROUND);
     let period = (fps as u64 * BAR_SWEEP_SECONDS).max(1);
-    let bar_x = (frame % period) * (canvas.width - BAR_WIDTH) as u64 / period;
-    canvas.rect(bar_x as i64, (canvas.height - BAR_HEIGHT) as i64, BAR_WIDTH, BAR_HEIGHT, BAR);
+    let bar_x = (frame % period) * (width - BAR_WIDTH) as u64 / period;
+    canvas.rect(bar_x as i64, (height - BAR_HEIGHT) as i64, BAR_WIDTH, BAR_HEIGHT, BAR);
     for &(x, y) in &state.trail {
         canvas.rect(x as i64 - (TRAIL_DOT / 2) as i64, y as i64 - (TRAIL_DOT / 2) as i64, TRAIL_DOT, TRAIL_DOT, TRAIL);
     }
     let lines = [
-        format!("{}X{} {} FPS  FRAME {frame}", canvas.width, canvas.height, fps),
+        format!("{width}X{height} {fps} FPS  FRAME {frame}"),
         format!("TOUCHES {}  FINGERS {}  KNOB {}", state.touches, state.pointers.len(), state.knob),
         state.pad.map_or("PAD -".to_string(), |(x, y)| format!("PAD {x},{y}")),
     ];
@@ -348,17 +347,6 @@ mod tests {
         assert_eq!(pixel(&canvas, 600 + MARKER / 3, 300 + MARKER / 3), POINTER_COLOURS[0]);
         assert_eq!(pixel(&canvas, 200 + MARKER / 3, 400 + MARKER / 3), POINTER_COLOURS[1]);
         assert_eq!(pixel(&canvas, 400, 240), BACKGROUND);
-    }
-
-    #[test]
-    fn packs_a_picture_for_the_esp32_encoder() {
-        let mut canvas = Canvas::new(4, 2);
-        canvas.fill([255, 255, 255]);
-        canvas.rect(2, 0, 2, 2, [255, 0, 0]);
-        let mut packed = [0; 12];
-        canvas.pack_yuv420(&mut packed);
-        // white then red: no colour then little blue on the first row, much red on the second
-        assert_eq!(packed, [128, 235, 235, 90, 82, 82, 128, 235, 235, 240, 82, 82]);
     }
 
     #[test]

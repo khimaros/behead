@@ -58,6 +58,9 @@ pub trait Tls {
 pub struct Options {
     pub media_audio: bool,
     pub microphone: bool,
+    /// the tallest picture the phone can make at speed. a headunit asking
+    /// for more gets the largest it offers within this, if it offers one
+    pub max_video_height: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -208,6 +211,18 @@ fn mode_of(config: &proto::VideoConfig) -> VideoMode {
         height: height - config.margin_height.unwrap_or(0),
         fps: if config.video_fps == Some(FPS_60) { 60 } else { 30 },
     }
+}
+
+/// the config to stream in: the one the headunit asked for, unless that is
+/// taller than the limit and it offers ones that are not, then the largest
+fn choose_config(configs: &[proto::VideoConfig], asked: u32, limit: Option<u32>) -> u32 {
+    let fits = |config: &proto::VideoConfig| limit.is_none_or(|limit| mode_of(config).height <= limit);
+    if configs.get(asked as usize).is_none_or(fits) {
+        return asked;
+    }
+    let pixels = |config: &proto::VideoConfig| mode_of(config).width * mode_of(config).height;
+    let fitting = configs.iter().enumerate().filter(|(_, config)| fits(config));
+    fitting.max_by_key(|(_, config)| pixels(config)).map_or(asked, |(index, _)| index as u32)
 }
 
 fn format_of(config: &proto::AudioConfig) -> AudioFormat {
@@ -513,6 +528,7 @@ impl<T: Tls> Session<T> {
 
     /// start or stop the stream so it tracks setup and focus state
     fn sync_video(&mut self, events: &mut Vec<Event>) -> Result<(), Error> {
+        let limit = self.options.max_video_height;
         let video = self.video.as_mut().unwrap();
         let channel = video.flow.channel;
         match video.flow.toggle() {
@@ -523,6 +539,7 @@ impl<T: Tls> Session<T> {
             }
             Some(true) => {
                 video.sent_config.clear();
+                video.flow.config = choose_config(&video.configs, video.flow.config, limit);
                 let config =
                     video.configs.get(video.flow.config as usize).ok_or(Error::Protocol("unknown video config"))?;
                 events.push(Event::VideoStarted(mode_of(config)));

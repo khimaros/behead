@@ -326,6 +326,28 @@ class SessionTest(unittest.TestCase):
         headunit.run_until(lambda: headunit.received(fakehu.VIDEO_CHANNEL, fakehu.START_INDICATION))
         self.assertIn(b"video started 1280x720@60\n", self.read_output(self.server.stderr, b"video started"))
 
+    def assert_starts(self, headunit, mode, config):
+        """the server tells its video command this mode, and names this config to the car"""
+        headunit.run_until(lambda: headunit.received(fakehu.VIDEO_CHANNEL, fakehu.START_INDICATION))
+        start = dict(fakehu.parse(headunit.received(fakehu.VIDEO_CHANNEL, fakehu.START_INDICATION)[0]))
+        self.assertEqual(start[2], config)
+        self.assertIn(b"video started %s\n" % mode, self.read_output(self.server.stderr, b"video started"))
+
+    def test_takes_a_smaller_mode_the_car_offers_when_told_a_height(self):
+        self.restart_server(options=["--max-height", "480"])
+        headunit = self.connect(resolution=(fakehu.RESOLUTION_1280X720, fakehu.RESOLUTION_800X480))
+        self.assert_starts(headunit, b"800x480@30", 1)
+
+    def test_keeps_the_mode_the_car_asks_for_when_it_fits_the_height(self):
+        self.restart_server(options=["--max-height", "720"])
+        headunit = self.connect(resolution=(fakehu.RESOLUTION_800X480, fakehu.RESOLUTION_1280X720))
+        self.assert_starts(headunit, b"800x480@30", 0)
+
+    def test_keeps_the_mode_the_car_asks_for_when_none_fits_the_height(self):
+        self.restart_server(options=["--max-height", "480"])
+        headunit = self.connect(resolution=fakehu.RESOLUTION_1280X720)
+        self.assert_starts(headunit, b"1280x720@30", 0)
+
     def test_respects_ack_window(self):
         headunit = self.connect(max_unacked=1, auto_ack=False)
         headunit.run_until(lambda: len(headunit.frames) == 1)

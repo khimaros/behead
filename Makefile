@@ -8,7 +8,7 @@ VM_TEST_DIR := /incant/tests/vm
 RPI_TARGET := aarch64-unknown-linux-musl
 RPI_BIN_DIR := target/$(RPI_TARGET)/release
 RPI_SERVICE := behead
-RPI_BINS := behead behead-demo
+RPI_BINS := behead behead-demo behead-launcher
 RPI_BIN := $(RPI_BIN_DIR)/behead
 RPI_DIR := rpi
 RPI_CERTS := $(RPI_DIR)/overlay/etc/behead/certs
@@ -22,7 +22,7 @@ CERT_CACHE ?= $(HOME)/.cache/behead/certs
 SESSION ?=
 SESSIONS ?=
 SESSIONS_DIR := sessions
-SESSION_NAMES := wayland kodi phosh waydroid
+SESSION_NAMES := wayland kodi phosh waydroid launcher
 KIOSK_SESSIONS := wayland kodi waydroid
 selected_sessions = $(sort $(SESSION) $(SESSIONS))
 unknown_sessions = $(filter-out $(SESSION_NAMES),$(selected_sessions))
@@ -146,7 +146,7 @@ test-vm: build
 	incus exec $(VM) --cwd $(VM_TEST_DIR) --env BEHEAD_HEADED=$(HEADED) -- python3 -m unittest -v $(TESTS) < /dev/null
 
 # openauto as the headunit, on a screen you can drive with a vnc viewer or a
-# browser. SESSION=wayland, kodi, phosh or waydroid shows a desktop session
+# browser. SESSION=wayland, kodi, phosh, waydroid or launcher shows a session
 # instead of the demo. opens gvncviewer when installed, otherwise the browser
 DEMO_VNC = $(VM_ADDRESS):0
 DEMO_WEB = http://$(VM_ADDRESS):6080/vnc.html?autoconnect=1&resize=scale

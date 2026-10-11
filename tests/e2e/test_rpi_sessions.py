@@ -1,5 +1,6 @@
 """end-to-end: the desktop sessions `make sessions-rpi` puts in the pi image"""
 
+import os
 import pathlib
 import re
 import subprocess
@@ -156,6 +157,25 @@ class RpiSessions(unittest.TestCase):
         self.assertIn("geoclue-2.0", self.packages("phosh"))
         socket = re.search(r"^nmea-socket=(\S+)$", self.geoclue.read_text(), re.MULTILINE).group(1)
         self.assertIn(f" --nmea-socket {socket} ", UNIT.read_text())
+
+    def test_the_launcher_needs_no_packages_and_plays_its_own_sound(self):
+        """it draws its own pictures and decodes its own music, so the image
+        gets its program, and a sound command that reads what it plays"""
+        self.collect(SESSION="launcher")
+        self.assertIn(f'VIDEO_CMD="{DEVICE_SESSIONS}/launcher.sh {{width}} {{height}} {{fps}}"\n', self.env.read_text())
+        self.assertIn(f'AUDIO_CMD="{DEVICE_SESSIONS}/launcher.sh --audio {{rate}} {{channels}}"\n', self.env.read_text())
+        self.assertEqual(self.package_lists(), [])
+        self.assertTrue((self.scripts / "launcher.sh").stat().st_mode & 0o111, "the session script cannot be run")
+        planned = subprocess.run(["make", "-n", "-C", ROOT, "image-rpi", f"RPI_HOSTNAME={HOSTNAME}", "SESSION=launcher"],
+                                 check=True, capture_output=True, text=True).stdout
+        self.assertRegex(planned, r"(?m)^install .*/usr/local/bin .*/behead-launcher$")
+        self.assertRegex(planned, rf"(?m)images/{HOSTNAME}-launcher\.img\.gz$")
+
+    def test_the_launcher_refuses_sound_it_would_play_at_the_wrong_speed(self):
+        refused = subprocess.run([ROOT / "sessions/launcher.sh", "--audio", "44100", "2"], capture_output=True,
+                                 env={"PATH": os.environ["PATH"], "BEHEAD_LAUNCHER_PIPE": str(self.dir / "pipe")})
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn(b"48000 2, not 44100 2", refused.stderr)
 
     def test_sessions_installs_more_than_the_one_shown(self):
         """kodi runs in the kiosk, so the kiosk's packages come with it"""

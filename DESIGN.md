@@ -412,7 +412,12 @@ what the end-to-end tests run. three parts:
 
 on linux the picture goes to stdout and the sound to a named pipe, which
 the server's `--audio-cmd` reads with `cat`. opening the pipe waits for a
-reader, so the launcher sends sound exactly while a car wants it. in the
+reader, so the launcher sends sound exactly while a car wants it.
+`sessions/launcher.sh` is both commands, since the server may start either
+first and whichever it is has to make the pipe: with three numbers it runs
+the launcher into ffmpeg, choosing the encoder as the recording sessions
+do, and with `--audio` it reads the pipe, or refuses a format the launcher
+does not play. that script is the pi image's `SESSION=launcher`. in the
 firmware the same `Source` feeds the session's media audio, and the card is
 a fat filesystem on the chip's sd host (`esp32/src/card.rs`), which rust's
 `std::fs` reads like any other.

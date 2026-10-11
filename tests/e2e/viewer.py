@@ -22,7 +22,9 @@ JPEG_END = b"\xff\xd9"
 # an access unit delimiter. ffmpeg's parser only knows a picture is complete
 # when the next one starts, and a still screen sends no next one
 PICTURE_END = b"\x00\x00\x00\x01\x09\xf0"
-RELOAD_MS = 40
+# the page waits this long after one picture before it asks for the next:
+# with the time a picture takes to come, under the 33 ms between a car's
+RELOAD_MS = 15
 # the keyboard as a car's buttons, by android key code: the arrows tilt a
 # rotary knob, enter clicks it, and the mouse wheel turns it
 KEYS = {"ArrowUp": 19, "ArrowDown": 20, "ArrowLeft": 21, "ArrowRight": 22, "Enter": 23,
@@ -135,8 +137,12 @@ class Viewer:
 
     def __init__(self, port):
         self.decoder = subprocess.Popen(
+            # one thread each way and every picture written at once: a decoder
+            # with a thread per core holds back a picture per thread, and
+            # ffmpeg writes a pipe in blocks of several pictures
             ["ffmpeg", "-loglevel", "error", "-fflags", "nobuffer", "-flags", "low_delay", "-probesize", "4096",
-             "-f", "h264", "-i", "-", "-c:v", "mjpeg", "-q:v", "5", "-f", "image2pipe", "-"],
+             "-threads", "1", "-f", "h264", "-i", "-", "-c:v", "mjpeg", "-threads", "1", "-q:v", "5",
+             "-flush_packets", "1", "-f", "image2pipe", "-"],
             # it complains of a broken pipe when the tests exit before it
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         os.set_blocking(self.decoder.stdin.fileno(), False)
@@ -164,6 +170,9 @@ class Viewer:
         slow browser never holds up a test"""
         try:
             self.decoder.stdin.write(annexb + PICTURE_END)
+            # now, not once python has gathered a block of them: the
+            # pictures of a still screen are a few hundred bytes each
+            self.decoder.stdin.flush()
         except (BlockingIOError, BrokenPipeError):
             pass
 

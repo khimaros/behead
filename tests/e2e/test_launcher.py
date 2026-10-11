@@ -15,6 +15,7 @@ import fakehu
 import test_session as tcp
 
 LAUNCHER = pathlib.Path(os.environ.get("BEHEAD_LAUNCHER_BIN", tcp.ROOT / "target/debug/behead-launcher"))
+SESSION = tcp.ROOT / "sessions/launcher.sh"
 WIDTH, HEIGHT = 800, 480
 ENCODE = ("ffmpeg -loglevel error -f rawvideo -pix_fmt rgb24 -s {width}x{height} -r {fps} -i - -pix_fmt yuv420p "
           "-c:v libx264 -preset ultrafast -tune zerolatency -profile:v baseline -g {fps} -f h264 -")
@@ -51,7 +52,9 @@ def make_encoded(path, pitch, *codec):
             "-ac", "2", *codec, "-y", path)
 
 
-class LauncherTest(tcp.ServerTest):
+class LauncherCase(tcp.ServerTest):
+    """the server showing the launcher, a card of tracks, and a car connected"""
+
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
@@ -64,13 +67,18 @@ class LauncherTest(tcp.ServerTest):
         # opus has one rate
         make_encoded(cls.music / "Album" / "3 between.opus", OPUS_PITCH, "-c:a", "libopus", "-ar", str(fakehu.MEDIA_RATE))
 
-    def setUp(self):
-        pipe = self.dir / "audio.pipe"
-        pipe.unlink(missing_ok=True)
+    def commands(self, pipe):
+        """the video and the audio command, which share a pipe that is not there yet"""
         os.mkfifo(pipe)
         launcher = (f"{LAUNCHER} --width {{width}} --height {{height}} --fps {{fps}} --music {self.music} "
                     f"--audio {pipe} | {ENCODE}")
-        self.start_server(launcher, options=["--audio-cmd", f"cat {pipe}"])
+        return launcher, f"cat {pipe}"
+
+    def setUp(self):
+        pipe = self.dir / "audio.pipe"
+        pipe.unlink(missing_ok=True)
+        video, audio = self.commands(pipe)
+        self.start_server(video, options=["--audio-cmd", audio])
         self.addCleanup(self.stop_server)
         self.headunit = self.connect(keycodes=(fakehu.HOME, fakehu.BACK, fakehu.DPAD_CENTER, fakehu.ROTARY))
         self.headunit.run_until(lambda: len(self.headunit.frames) >= WARMUP_FRAMES and self.headunit.audio)
@@ -116,6 +124,30 @@ class LauncherTest(tcp.ServerTest):
         red, _, blue = self.picture()[(y * WIDTH + x) * 3:][:3]
         return blue - red > BLUE_OVER_RED
 
+    def assert_blue(self, spot, blue, message):
+        """the spot becomes blue, or stops being it, in the time a busy machine
+        takes to draw, encode and send what was just asked for"""
+        deadline = time.monotonic() + fakehu.TIMEOUT
+        while self.is_blue(spot) != blue:
+            self.assertLess(time.monotonic(), deadline, message)
+
+
+class LauncherSessionTest(LauncherCase):
+    """the launcher as the pi image runs it: `sessions/launcher.sh` for the
+    picture and for the sound, with the music where the image keeps media"""
+
+    def commands(self, pipe):
+        settings = f"env BEHEAD_MEDIA={self.dir} BEHEAD_LAUNCHER_PIPE={pipe} PATH={LAUNCHER.parent}:$PATH {SESSION}"
+        return f"{settings} {{width}} {{height}} {{fps}}", f"{settings} --audio {{rate}} {{channels}}"
+
+    def test_shows_the_launcher_and_plays_its_music(self):
+        self.assert_blue(TILE_SPOT, True, "the launcher's tiles are not on the screen")
+        self.tap(MUSIC_TILE)
+        self.tap(SECOND_LINE)
+        self.assert_pitch(WAV_PITCH)
+
+
+class LauncherTest(LauncherCase):
     def test_plays_and_pauses_a_track_by_touch(self):
         self.assert_silent()
         self.tap(MUSIC_TILE)
@@ -146,13 +178,13 @@ class LauncherTest(tcp.ServerTest):
         self.assert_pitch(FLAC_PITCH)
 
     def test_shows_the_screen_asked_for(self):
-        self.assertTrue(self.is_blue(TILE_SPOT), "the knob starts on the music tile")
+        self.assert_blue(TILE_SPOT, True, "the knob starts on the music tile")
         self.tap(MUSIC_TILE)
-        self.assertFalse(self.is_blue(TILE_SPOT), "the music screen did not open")
+        self.assert_blue(TILE_SPOT, False, "the music screen did not open")
         self.press(fakehu.HOME)
-        self.assertTrue(self.is_blue(TILE_SPOT), "home did not bring the tiles back")
+        self.assert_blue(TILE_SPOT, True, "home did not bring the tiles back")
         self.headunit.turn(fakehu.ROTARY, 1)
-        self.assertFalse(self.is_blue(TILE_SPOT), "the knob did not move to the other tile")
+        self.assert_blue(TILE_SPOT, False, "the knob did not move to the other tile")
 
 
 if __name__ == "__main__":

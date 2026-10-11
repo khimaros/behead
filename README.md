@@ -337,9 +337,9 @@ auto. `systemctl stop behead` on the pi hands the port back to ssh over
 usb. the video command is set in `/etc/behead/behead.env`, and shows the
 demo.
 
-to put a desktop session on the headunit instead, name it when building:
+to put a session on the headunit instead, name it when building:
 
-    make image-rpi SESSION=phosh                 # wayland, kodi, phosh or waydroid
+    make image-rpi SESSION=phosh                 # wayland, kodi, phosh, waydroid or launcher
     make image-rpi SESSION=kodi SESSIONS=phosh   # kodi shown, phosh installed beside it
 
 `SESSION` is the session shown, and `SESSIONS` installs more to switch to
@@ -365,6 +365,11 @@ well, under Movies and Music, a moment after each start of the session:
 being the form kodi asks for, in a `.nfo` it writes beside the file, since
 the pi has no internet to look films up with. a `.nfo` of your own is kept.
 files copied while kodi runs appear at the next start.
+
+`SESSION=launcher` is the launcher described below, with its music player.
+it plays what is in `/home/behead/media/music`, the same files kodi plays,
+needs no packages beyond the demo's, and reads the directory when it
+starts, so music copied later is there after `systemctl restart behead`.
 the directory is `BEHEAD_MEDIA` in `behead.service`; sources added or
 changed in kodi are kept.
 
@@ -426,14 +431,16 @@ see [esp32/README.md](esp32/README.md) for what it needs and what it lacks.
 
 `behead-launcher` is a video source like `behead-demo`, made for the car: a
 home screen with two tiles, MUSIC and INPUTS. it is what the esp32-p4
-firmware shows, and runs on linux too:
+firmware shows, a session of the pi image (`make image-rpi
+SESSION=launcher`), and runs on any linux through its session script,
+which plays `~/Music`, or `$BEHEAD_MEDIA/music`:
 
-    mkfifo /tmp/behead-audio
-    behead --cert phone.crt --key phone.key --audio-cmd 'cat /tmp/behead-audio' \
-        --video-cmd 'behead-launcher --width {width} --height {height} --fps {fps} \
-            --music ~/Music --audio /tmp/behead-audio | ffmpeg -loglevel error -f rawvideo \
-            -pix_fmt rgb24 -s {width}x{height} -r {fps} -i - -pix_fmt yuv420p -c:v libx264 \
-            -preset ultrafast -tune zerolatency -profile:v baseline -g {fps} -f h264 -'
+    behead --cert phone.crt --key phone.key \
+        --video-cmd 'sessions/launcher.sh {width} {height} {fps}' \
+        --audio-cmd 'sessions/launcher.sh --audio {rate} {channels}'
+
+the script pipes the launcher's pictures into ffmpeg, and its sound through
+a named pipe to the audio command. `behead-launcher` has to be on the path.
 
 - MUSIC lists the folders and the mp3, flac, opus and wav files under `--music`,
   by file name. a touch on a folder opens it, and on a track plays it, or

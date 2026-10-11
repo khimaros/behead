@@ -5,6 +5,7 @@
 mod font;
 mod packed;
 
+pub use font::plain;
 pub use packed::Packed;
 use std::collections::{BTreeMap, VecDeque};
 use std::ops::Range;

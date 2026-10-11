@@ -42,11 +42,14 @@ AUDIO_BACKLOG = 50
 # seconds the page starts a piece of sound ahead of now, which evens out
 # how pieces arrive, and how far ahead it may get before it drops one
 AUDIO_LEAD, AUDIO_LIMIT = 0.1, 1
+# keeps a browser from marking the picture as selected text when the mouse
+# drags across it, and from scrolling or zooming under a real finger
+UNSELECTABLE = "user-select:none;-webkit-user-select:none;touch-action:none"
 PAGE = f"""<!doctype html><title>behead headunit</title>
-<body style="margin:0;background:#000;display:flex;justify-content:center;align-items:center;height:100vh">
+<body style="margin:0;background:#000;display:flex;justify-content:center;align-items:center;height:100vh;{UNSELECTABLE}">
 <p id="waiting" style="color:#888;font:16px sans-serif">waiting for video</p>
 <p style="position:fixed;bottom:0;margin:4px;color:#666;font:12px sans-serif">{HELP}</p>
-<img id="picture" draggable="false" style="max-width:100%;max-height:100%;display:none">
+<img id="picture" draggable="false" style="max-width:100%;max-height:100%;display:none;{UNSELECTABLE}">
 <script>
 // looked up by id: a bare `screen` would be the browser's own window.screen
 const picture = document.getElementById("picture"), waiting = document.getElementById("waiting");
@@ -65,6 +68,8 @@ const touch = (action, event) => {{
 picture.onpointerdown = (event) => {{ down = true; picture.setPointerCapture(event.pointerId); touch("down", event); }};
 picture.onpointermove = (event) => down && touch("move", event);
 picture.onpointerup = (event) => {{ down = false; touch("up", event); }};
+// a drag is a finger moving, and neither marks the picture nor picks it up
+picture.onmousedown = picture.ondragstart = (event) => event.preventDefault();
 // the keyboard is the car's buttons. a held key repeats, a held button does not
 const keys = {json.dumps(KEYS)};
 const button = (event, pressed) => {{

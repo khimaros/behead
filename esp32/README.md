@@ -72,6 +72,8 @@ the linux server the firmware holds one certificate, not a list to try.
 ## not done
 
 - the usb controller's dma, which corrupted the stream (sdkconfig.defaults).
+  untried since everything that starts a usb transfer was put on one core,
+  which may have been its trouble too.
 - the microphone and the car's sensors: the session leaves them unopened.
 - leaving the car its own sound while nothing plays: the firmware takes
   the car's audio focus as soon as it connects, so the radio stops for a

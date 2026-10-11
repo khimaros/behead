@@ -2,8 +2,10 @@
 cable. the firmware shows the launcher, so the device tests that need the
 demo open it first, and the music is whatever the card in the board holds"""
 
+import os
 import statistics
 import sys
+import time
 import unittest
 
 # first: it puts the other tiers' modules on the path
@@ -11,8 +13,8 @@ import test_device
 import fakehu
 import latency
 
-# the middle of the launcher's second tile, which opens the demo
-INPUTS_TILE = (600, 240)
+# the middle of the launcher's tiles: the music player, and the demo
+MUSIC_TILE, INPUTS_TILE = (200, 240), (600, 240)
 # android's key to play, which unlike play-pause never stops what plays
 PLAY, PAUSE = 126, 127
 # how often a car leaves and comes back before the music is tried
@@ -22,6 +24,11 @@ SETTLE = 0.5
 LISTEN = 3
 BYTES_PER_SECOND = fakehu.MEDIA_RATE * fakehu.MEDIA_CHANNELS * fakehu.SAMPLE_BITS // 8
 RATE_TOLERANCE = 0.1
+# seconds to play on for, from `make test-device SOAK=`, checked a window
+# at a time. the firmware sends sound in packets of this length
+SOAK = float(os.environ.get("BEHEAD_SOAK") or 0)
+SOAK_WINDOW = 5
+PACKET_SECONDS = 0.04
 
 
 class FirmwareTest(test_device.DeviceTest):
@@ -72,6 +79,37 @@ class FirmwareTest(test_device.DeviceTest):
         for _ in range(RETURNS):
             self.listener().sock.close()
         self.assert_plays(self.listener())
+
+    @unittest.skipUnless(SOAK, "takes as long as asked: make test-device DEVICE=esp32 SOAK=600")
+    def test_plays_on_without_a_stall(self):
+        """a transfer the usb driver loses stops sound and pictures for good,
+        with nothing in the log. it showed anywhere from 20 seconds to four
+        minutes into a track, which no other test here plays for"""
+        headunit = self.listener()
+        # on the music screen, as someone listening is, whatever screen
+        # the last car left
+        headunit.button(fakehu.HOME, True)
+        headunit.button(fakehu.HOME, False)
+        headunit.touch(fakehu.TOUCH_DOWN, [(0, *MUSIC_TILE)])
+        headunit.touch(fakehu.TOUCH_UP, [(0, *MUSIC_TILE)])
+        headunit.button(PLAY, True)
+        headunit.button(PLAY, False)
+        latency.pause(headunit, SETTLE)
+        end = time.monotonic() + SOAK
+        while time.monotonic() < end:
+            packets, pictures = len(headunit.audio), len(headunit.frames)
+            latency.pause(headunit, SOAK_WINDOW)
+            sound = (len(headunit.audio) - packets) * PACKET_SECONDS / SOAK_WINDOW
+            rate = (len(headunit.frames) - pictures) / SOAK_WINDOW
+            left = f"{end - time.monotonic():.0f} s before the end"
+            self.assertAlmostEqual(sound, 1, delta=RATE_TOLERANCE, msg=f"sound fell behind {left}")
+            self.assertAlmostEqual(rate, test_device.FRAME_RATE, delta=test_device.RATE_TOLERANCE, msg=left)
+            # hours of it would not fit in memory
+            for kept in (headunit.audio, headunit.frames, headunit.arrivals, headunit.log):
+                del kept[:]
+        headunit.button(PAUSE, True)
+        headunit.button(PAUSE, False)
+        latency.pause(headunit, SETTLE)
 
 
 if __name__ == "__main__":

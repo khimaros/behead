@@ -45,6 +45,15 @@ than drawing and encoding together. it uses esp-idf through `esp-idf-sys`, since
 encoder's driver and the high speed usb port exist only there. it runs on
 a board over the chip's full speed port (see esp32/README.md).
 
+the chip has two cores, and everything that starts a usb transfer is kept
+on the one the usb interrupt is on: tinyusb's task by its setting, and the
+threads that write to the headunit and switch the device's identity by
+`usb::on_usb_core`. tinyusb's driver guards a transfer it is starting by
+stopping interrupts on its own core, which keeps its interrupt handler out
+only there. from the other core the two wrote one endpoint at once, and a
+transfer was lost for good after minutes of streaming. drawing, encoding
+and music are free to run on either core.
+
 ## session flow
 
 1. headunit sends a version request, we answer with a version response

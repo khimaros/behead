@@ -453,8 +453,11 @@ a named pipe to the audio command. `behead-launcher` has to be on the path.
   screen, and home returns to the tiles. the car's play, pause, next and
   previous keys work on every screen.
 
-names are shown in capitals, with digits and common punctuation. other
-characters, accented letters among them, show as blanks.
+names are shown in capitals, with digits and common punctuation. a letter
+with an accent or another mark is shown without it, as far as the latin of
+europe and vietnamese go: RÜFÜS is RUFUS. other characters, those of other
+scripts among them, show as blanks. a name too long for its place slides
+to its end and back: the line the knob is on, and the title of what plays.
 
 ## test
 
@@ -472,7 +475,9 @@ receives, live in the browser, which opens by itself (`OPEN=` to not), and
 
 `make test-device` needs the udev rule in `tests/device/70-behead.rules`
 installed on the laptop, and the device's usb port cabled to it. it also
-prints the device's touch to picture latency.
+prints the device's touch to picture latency. with `DEVICE=esp32 SOAK=600`
+it also plays the card's music for that many seconds and fails if sound or
+pictures fall behind, which is the test for a stall that takes minutes.
 
 `make headunit` makes the browser the headunit of whatever device is on
 the cable, a pi or an esp32-p4: its video on a page,

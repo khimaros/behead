@@ -239,11 +239,14 @@ deploy-rpi: build-rpi
 	ssh root@$(RPI_ADDRESS) 'systemctl stop $(RPI_SERVICE) && cd /tmp && install -m 755 $(RPI_BINS) /usr/local/bin/ \
 		&& systemctl start $(RPI_SERVICE) && systemctl is-active $(RPI_SERVICE)'
 
-# laptop as headunit, against the DEVICE connected by usb cable
+# laptop as headunit, against the DEVICE connected by usb cable. SOAK is
+# seconds for the esp32's music to play on, to show a stall that takes
+# minutes to come: without it that test is left out
+SOAK ?=
 test-device:
 	$(check_device)
 	$(if $(HEADED),$(call open_when_up,$(LOCAL_VIEWER),xdg-open $(LOCAL_VIEWER)))
-	cd $(DEVICE_TEST_DIR) && BEHEAD_HEADED=$(HEADED) uv run --no-project --with $(PYUSB) python -m unittest -v \
+	cd $(DEVICE_TEST_DIR) && BEHEAD_HEADED=$(HEADED) BEHEAD_SOAK=$(SOAK) uv run --no-project --with $(PYUSB) python -m unittest -v \
 		$(or $(TESTS),$(DEVICE_TESTS))
 
 # the browser as the headunit of whatever device is on the cable: its video

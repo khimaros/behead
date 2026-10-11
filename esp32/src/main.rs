@@ -91,7 +91,7 @@ fn draw(mode: VideoMode, app: Arc<Mutex<App>>, spare: Receiver<Picture>, drawn: 
     let mut due = started;
     for (frame, mut picture) in spare.into_iter().enumerate() {
         let app = app.lock().unwrap();
-        let shows = Some(app.shows(frame as u64));
+        let shows = Some(app.shows(mode.fps, frame as u64));
         if picture.shows != shows {
             app.render(&mut Packed::new(mode.width, mode.height, picture.yuv.bytes()), mode.fps, frame as u64);
             picture.shows = shows;
@@ -200,7 +200,8 @@ fn serve(reader: usb::FromHost, writer: usb::ToHost, stage: &Stage) -> Result<()
     let options = Options { media_audio: true, max_video_height: Some(MAX_HEIGHT), ..Options::default() };
     let session = Session::new(tls::MbedTls::new(CERTIFICATE, KEY)?, options);
     let host = Host { video_epoch: 0, audio_epoch: 0, stage: stage.clone() };
-    let shared: Shared = behead_link::open(session, writer, host);
+    // the link's thread is the one that writes to the headunit
+    let shared: Shared = usb::on_usb_core(|| behead_link::open(session, writer, host));
     behead_link::serve(&shared, reader, |link, event| handle(&shared, &mut link.host, event))
 }
 

@@ -44,6 +44,10 @@ const PORT: u8 = 1;
 const PORT: u8 = 0;
 /// room for the strings a headunit sends about itself, which nothing here reads
 const STRING_ROOM: usize = 256;
+/// the core the usb interrupt is on: the main task's, which installs the
+/// driver (CONFIG_ESP_MAIN_TASK_AFFINITY, and sdkconfig.defaults for
+/// tinyusb's own task)
+const USB_CORE: i32 = 0;
 
 /// where the chip says which of its two full speed transceivers serves what
 #[cfg(esp_idf_tinyusb_rhport_fs)]
@@ -182,8 +186,26 @@ pub fn install() -> Result<(), String> {
     if status != sys::ESP_OK {
         return Err(format!("usb: installing the driver failed ({status})"));
     }
-    std::thread::spawn(switch_identities);
+    on_usb_core(|| std::thread::spawn(switch_identities));
     Ok(())
+}
+
+/// run what makes threads, with the threads it makes kept on the core the
+/// usb interrupt is on. tinyusb's driver stops interrupts on the core it
+/// runs on while it starts a transfer, and takes that for stopping its own
+/// interrupt: a transfer started on the other core runs beside the
+/// interrupt, both write the endpoint's fifo, and the headunit waits for
+/// data that never leaves. every thread that reads, writes or reconnects
+/// goes through here; the main task, which reads, is on that core already
+pub fn on_usb_core<T>(make: impl FnOnce() -> T) -> T {
+    // SAFETY: plain settings for the threads this one makes next, which
+    // esp-idf copies
+    let usual = unsafe { sys::esp_pthread_get_default_config() };
+    let pinned = sys::esp_pthread_cfg_t { pin_to_core: USB_CORE, ..usual };
+    unsafe { sys::esp_pthread_set_cfg(&pinned) };
+    let made = make();
+    unsafe { sys::esp_pthread_set_cfg(&usual) };
+    made
 }
 
 /// leave the bus and come back under other ids, as if replugged

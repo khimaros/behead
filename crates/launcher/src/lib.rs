@@ -9,7 +9,7 @@ mod library;
 mod opus;
 mod player;
 
-use behead_demo::{parse_point, Surface, ADVANCE, GLYPH_HEIGHT, ROTARY};
+use behead_demo::{parse_point, plain, Surface, ADVANCE, GLYPH_HEIGHT, ROTARY};
 use library::Entry;
 pub use player::{Now, Player, Source};
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -37,6 +37,11 @@ const BUTTON_WIDTH: u32 = 44;
 const PAGER_WIDTH: u32 = 32;
 /// how many times a tile's name is the size of other text
 const TILE_TEXT: u32 = 2;
+/// a name too long for its place slides a letter this often, slowly enough
+/// to read and to cost the esp32-p4 few pictures drawn, and rests for this
+/// many steps at each end
+const SLIDE_STEPS_PER_SECOND: u64 = 2;
+const SLIDE_REST: u64 = 4;
 const TITLE: &str = "BEHEAD";
 const MUSIC: &str = "MUSIC";
 const TILES: [(&str, Screen); 2] = [(MUSIC, Screen::Music), ("INPUTS", Screen::Demo)];
@@ -110,8 +115,9 @@ pub struct App {
     top: usize,
 }
 
+/// as much of a text as fits a width, in letters the font has
 fn fit(text: &str, width: u32, scale: u32) -> String {
-    text.chars().take((width / (ADVANCE * scale)) as usize).collect()
+    plain(text).chars().take((width / (ADVANCE * scale)) as usize).collect()
 }
 
 /// text at the left of an area, or in its middle, halfway down it
@@ -121,6 +127,42 @@ fn write(surface: &mut impl Surface, area: Area, scale: u32, centred: bool, colo
     let x = area.x + if centred { spare / 2 } else { 0 };
     let y = area.y + area.height.saturating_sub(GLYPH_HEIGHT * scale) / 2;
     surface.text(x as i64, y as i64, scale, colour, &text);
+}
+
+/// a line of a folder's listing as text, and the colour it is in: the
+/// track that plays is marked, and in a colour of its own
+fn label(tracks: &[String], entry: Entry, now: Option<Now>) -> (String, [u8; 3]) {
+    match entry {
+        Entry::Folder(name) => (format!("{name}{}", library::SEPARATOR), TEXT),
+        Entry::Track(track) if now.is_some_and(|now| now.track == track) => {
+            (format!("> {}", library::title(&tracks[track])), PLAYING)
+        }
+        Entry::Track(track) => (library::title(&tracks[track]).to_string(), TEXT),
+    }
+}
+
+/// a text from this many of its letters on, as the font shows them
+fn skip(text: &str, letters: usize) -> String {
+    plain(text).chars().skip(letters).collect()
+}
+
+/// how many letters of a text have no room in a width
+fn over(text: &str, width: u32, scale: u32) -> usize {
+    plain(text).chars().count().saturating_sub((width / (ADVANCE * scale)) as usize)
+}
+
+/// which step of sliding a picture is at
+fn slide_step(fps: u32, frame: u64) -> u64 {
+    frame * SLIDE_STEPS_PER_SECOND / fps.max(1) as u64
+}
+
+/// how far a text with this many letters too many has slid at a step: a
+/// letter a step to its end, a rest there, back the same way, and a rest
+/// at its start
+fn slide(over: usize, step: u64) -> usize {
+    let (over, turn) = (over as u64, over as u64 + SLIDE_REST);
+    let along = step % (2 * turn);
+    along.min(2 * turn - along).saturating_sub(SLIDE_REST / 2).min(over) as usize
 }
 
 fn panel(surface: &mut impl Surface, area: Area, colour: [u8; 3]) {
@@ -142,11 +184,12 @@ impl App {
     /// keeps its pictures need not draw one it has. drawing costs the
     /// esp32-p4 more than its time, for a picture pushes what the music
     /// decoder needs out of the chip's cache
-    pub fn shows(&self, frame: u64) -> u64 {
+    pub fn shows(&self, fps: u32, frame: u64) -> u64 {
         let now = self.player.now().map(|now| (now.track, now.paused, now.elapsed.as_secs()));
         let listed = (&self.folder, self.cursor, self.top, self.player.tracks().len(), self.player.note());
-        // the demo's bar moves in every picture
-        let moving = (self.screen == Screen::Demo).then_some(frame);
+        // the demo's bar moves in every picture, and a long name a few
+        // times a second
+        let moving = ((self.screen == Screen::Demo).then_some(frame), self.slides(slide_step(fps, frame)));
         let mut hasher = DefaultHasher::new();
         (self.size, self.screen, self.tile, listed, now, moving).hash(&mut hasher);
         hasher.finish()
@@ -342,9 +385,31 @@ impl App {
         }
     }
 
-    /// the lines of the folder listed, the one the knob is on marked, and
-    /// the track that plays in a colour of its own
-    fn render_list(&self, surface: &mut impl Surface, tracks: &[String], entries: &[Entry]) {
+    /// where a line of the list has its text, and the footer the title of
+    /// what plays: all the width but a little at each side
+    fn text_in(&self, area: Area) -> Area {
+        let pad = PAD * self.scale();
+        Area { x: area.x + pad, width: area.width.saturating_sub(2 * pad), ..area }
+    }
+
+    /// how far along the two texts that slide are at a step, when they are
+    /// too long for their places: the line the knob is on, and the title of
+    /// what plays, for as long as it does
+    fn slides(&self, step: u64) -> (usize, usize) {
+        let (scale, tracks, now) = (self.scale(), self.player.tracks(), self.player.now());
+        if self.screen != Screen::Music {
+            return (0, 0);
+        }
+        let slid = |text: &str, area: Area| slide(over(text, self.text_in(area).width, scale), step);
+        let line = library::entries(&tracks, &self.folder).get(self.cursor).map(|entry| label(&tracks, *entry, now).0);
+        let title =
+            now.filter(|now| !now.paused).and_then(|now| tracks.get(now.track)).map(|track| library::title(track));
+        (line.map_or(0, |line| slid(&line, self.list())), title.map_or(0, |title| slid(title, self.footer())))
+    }
+
+    /// the lines of the folder listed, the one the knob is on marked and
+    /// slid this far, and the track that plays in a colour of its own
+    fn render_list(&self, surface: &mut impl Surface, tracks: &[String], entries: &[Entry], slid: usize) {
         let (scale, list, now) = (self.scale(), self.list(), self.player.now());
         if entries.is_empty() {
             write(surface, list, scale, true, TEXT, self.player.note());
@@ -352,36 +417,31 @@ impl App {
         let shown = entries.iter().enumerate().skip(self.top).take(self.rows());
         for (row, (index, entry)) in shown.enumerate() {
             let line = Area { y: list.y + row as u32 * ROW * scale, height: ROW * scale, ..list };
+            let (text, colour) = label(tracks, *entry, now);
             if index == self.cursor {
                 panel(surface, line, FOCUS);
             }
-            let (text, colour) = match *entry {
-                Entry::Folder(name) => (format!("{name}{}", library::SEPARATOR), TEXT),
-                Entry::Track(track) if now.is_some_and(|now| now.track == track) => {
-                    (format!("> {}", library::title(&tracks[track])), PLAYING)
-                }
-                Entry::Track(track) => (library::title(&tracks[track]).to_string(), TEXT),
-            };
-            let inside = Area { x: line.x + PAD * scale, width: line.width.saturating_sub(2 * PAD * scale), ..line };
-            write(surface, inside, scale, false, colour, &text);
+            let from = if index == self.cursor { slid } else { 0 };
+            write(surface, self.text_in(line), scale, false, colour, &skip(&text, from));
         }
     }
 
-    /// what plays and for how long, beside the player's buttons
-    fn render_footer(&self, surface: &mut impl Surface, tracks: &[String]) {
+    /// what plays, its title slid this far, and for how long, beside the
+    /// player's buttons
+    fn render_footer(&self, surface: &mut impl Surface, tracks: &[String], slid: usize) {
         let (scale, footer) = (self.scale(), self.footer());
         panel(surface, footer, PANEL);
         let Some(now) = self.player.now() else { return };
-        let inside = Area { x: PAD * scale, width: footer.width.saturating_sub(2 * PAD * scale), ..footer };
-        let title = tracks.get(now.track).map_or("", |track| library::title(track));
-        write(surface, Area { height: ROW * scale, ..inside }, scale, false, PLAYING, title);
+        let inside = self.text_in(footer);
+        let title = skip(tracks.get(now.track).map_or("", |track| library::title(track)), slid);
+        write(surface, Area { height: ROW * scale, ..inside }, scale, false, PLAYING, &title);
         let seconds = now.elapsed.as_secs();
         let time = Area { y: footer.y + ROW * scale, height: BAR * scale, ..inside };
         write(surface, time, scale, false, TEXT, &format!("{}:{:02}", seconds / 60, seconds % 60));
     }
 
-    fn render_music(&self, surface: &mut impl Surface) {
-        let (scale, tracks) = (self.scale(), self.player.tracks());
+    fn render_music(&self, surface: &mut impl Surface, step: u64) {
+        let (scale, tracks, (line, title)) = (self.scale(), self.player.tracks(), self.slides(step));
         let entries = library::entries(&tracks, &self.folder);
         surface.fill(BACKGROUND);
         let header = Area { x: 0, y: 0, width: self.size.0, height: BAR * scale };
@@ -392,8 +452,8 @@ impl App {
         write(surface, name, scale, false, TEXT, if self.folder.is_empty() { MUSIC } else { &self.folder });
         let counter = Area { x: header.width.saturating_sub(taken), width: BUTTON_WIDTH * scale, ..header };
         write(surface, counter, scale, true, TEXT, &place);
-        self.render_list(surface, &tracks, &entries);
-        self.render_footer(surface, &tracks);
+        self.render_list(surface, &tracks, &entries, line);
+        self.render_footer(surface, &tracks, title);
     }
 
     /// draw one frame of the screen that shows
@@ -405,7 +465,7 @@ impl App {
                 let header = Area { x: 0, y: 0, width: self.size.0, height: BAR * scale };
                 write(surface, header, scale, true, TEXT, TITLE);
             }
-            Screen::Music => self.render_music(surface),
+            Screen::Music => self.render_music(surface, slide_step(fps, frame)),
             Screen::Demo => behead_demo::render(surface, &self.demo, fps, frame),
         }
         let home = self.screen == Screen::Home;
@@ -439,9 +499,14 @@ mod tests {
 
     /// a launcher on a card with two folders and ten tracks beside them
     fn launcher(name: &str) -> (App, Player, std::path::PathBuf) {
-        let root = std::env::temp_dir().join(format!("behead-launcher-{name}-{}", std::process::id()));
         let tracks = (0..10).map(|index| format!("{index}.wav"));
-        for file in ["Album/one.wav", "Album/two.wav", "Zoo/x.wav"].map(String::from).into_iter().chain(tracks) {
+        launcher_with(name, ["Album/one.wav", "Album/two.wav", "Zoo/x.wav"].map(String::from).into_iter().chain(tracks))
+    }
+
+    /// a launcher on a card of these files
+    fn launcher_with(name: &str, files: impl Iterator<Item = String>) -> (App, Player, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("behead-launcher-{name}-{}", std::process::id()));
+        for file in files {
             std::fs::create_dir_all(root.join(&file).parent().unwrap()).unwrap();
             std::fs::write(root.join(file), b"").unwrap();
         }
@@ -559,16 +624,41 @@ mod tests {
     #[test]
     fn says_when_the_picture_would_be_another() {
         let (mut app, player, _) = launcher("shows");
-        let home = app.shows(0);
-        assert_eq!(app.shows(1), home, "a still screen is the same picture later");
+        let home = app.shows(30, 0);
+        assert_eq!(app.shows(30, 1), home, "a still screen is the same picture later");
         feed(&mut app, &["relative 65536 1"]);
-        assert_ne!(app.shows(1), home, "the knob moved to the other tile");
+        assert_ne!(app.shows(30, 1), home, "the knob moved to the other tile");
         feed(&mut app, &["relative 65536 -1", "touch move 0 0:5,5"]);
-        assert_eq!(app.shows(2), home);
+        assert_eq!(app.shows(30, 2), home);
         player.play(3);
-        assert_ne!(app.shows(2), home, "a track started, which the music screen marks");
+        assert_ne!(app.shows(30, 2), home, "a track started, which the music screen marks");
         tap(&mut app, "600,240");
-        assert_ne!(app.shows(3), app.shows(4), "the input test moves by itself");
+        assert_ne!(app.shows(30, 3), app.shows(30, 4), "the input test moves by itself");
+    }
+
+    #[test]
+    fn a_text_slides_to_its_end_and_back_with_a_rest_at_each() {
+        let slid: Vec<usize> = (0..15).map(|step| slide(3, step)).collect();
+        assert_eq!(slid, [0, 0, 0, 1, 2, 3, 3, 3, 3, 3, 2, 1, 0, 0, 0]);
+        assert!((0..40).all(|step| slide(0, step) == 0), "a text that fits stays where it is");
+    }
+
+    #[test]
+    fn slides_a_long_name_on_the_knobs_line_and_the_title_of_what_plays() {
+        // 60 letters, where a line of the list has room for 38 and the footer for 43
+        let long = format!("{}.wav", "a long name of sixty letters ".repeat(3).split_at(60).0);
+        let (mut app, player, _) = launcher_with("slide", [long, "short.wav".to_string()].into_iter());
+        tap(&mut app, MUSIC_TILE);
+        let (rested, moved) = (SLIDE_REST / 2, SLIDE_REST / 2 + 5);
+        assert_eq!((app.slides(rested), app.slides(moved)), ((0, 0), (5, 0)), "the line the knob is on slides");
+        assert_ne!(app.shows(30, 0), app.shows(30, 30 * moved / SLIDE_STEPS_PER_SECOND), "and is drawn anew for it");
+        assert_eq!(app.shows(30, 0), app.shows(30, 1), "but not for every picture");
+        feed(&mut app, &["button 23 down", "relative 65536 1"]);
+        assert_eq!(app.slides(moved), (0, 5), "the title of what plays slides, and the short line does not");
+        player.pause(|_| true);
+        assert_eq!(app.slides(moved), (0, 0), "a title at rest stays where it is");
+        feed(&mut app, &["button 126 down", "button 3 down"]);
+        assert_eq!(app.slides(moved), (0, 0), "nothing slides on another screen");
     }
 
     #[test]

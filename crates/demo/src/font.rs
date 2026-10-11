@@ -62,3 +62,132 @@ pub fn glyph(c: char) -> [u8; 7] {
     let c = c.to_ascii_uppercase();
     GLYPHS.iter().find(|(g, _)| *g == c).map_or([0; 7], |(_, rows)| *rows)
 }
+
+/// stands in the table below for a letter left as it is
+const AS_IS: char = '\0';
+/// letters with marks on them, as runs: from each code on, up to the next
+/// entry's, every letter is drawn as the plain one named. unicode keeps the
+/// marked forms of a letter side by side, capitals and small ones in turn,
+/// which is what makes runs of them. the latin of western and central
+/// europe, and vietnamese
+const MARKED: &[(u32, char)] = &[
+    (0xC0, 'A'),
+    (0xC7, 'C'),
+    (0xC8, 'E'),
+    (0xCC, 'I'),
+    (0xD0, 'D'),
+    (0xD1, 'N'),
+    (0xD2, 'O'),
+    (0xD7, 'X'),
+    (0xD8, 'O'),
+    (0xD9, 'U'),
+    (0xDD, 'Y'),
+    (0xDE, 'T'),
+    (0xDF, 'S'),
+    (0xE0, 'A'),
+    (0xE7, 'C'),
+    (0xE8, 'E'),
+    (0xEC, 'I'),
+    (0xF0, 'D'),
+    (0xF1, 'N'),
+    (0xF2, 'O'),
+    (0xF7, '/'),
+    (0xF8, 'O'),
+    (0xF9, 'U'),
+    (0xFD, 'Y'),
+    (0xFE, 'T'),
+    (0xFF, 'Y'),
+    (0x100, 'A'),
+    (0x106, 'C'),
+    (0x10E, 'D'),
+    (0x112, 'E'),
+    (0x11C, 'G'),
+    (0x124, 'H'),
+    (0x128, 'I'),
+    (0x134, 'J'),
+    (0x136, 'K'),
+    (0x139, 'L'),
+    (0x143, 'N'),
+    (0x14C, 'O'),
+    (0x154, 'R'),
+    (0x15A, 'S'),
+    (0x162, 'T'),
+    (0x168, 'U'),
+    (0x174, 'W'),
+    (0x176, 'Y'),
+    (0x179, 'Z'),
+    (0x17F, 'S'),
+    (0x180, AS_IS),
+    (0x1A0, 'O'),
+    (0x1A2, AS_IS),
+    (0x1AF, 'U'),
+    (0x1B1, AS_IS),
+    (0x1EA0, 'A'),
+    (0x1EB8, 'E'),
+    (0x1EC8, 'I'),
+    (0x1ECC, 'O'),
+    (0x1EE4, 'U'),
+    (0x1EF2, 'Y'),
+    (0x1EFA, AS_IS),
+];
+/// marks that stand by themselves after the letter they belong to, which is
+/// how some systems write every marked letter
+const LOOSE_MARKS: std::ops::RangeInclusive<char> = '\u{300}'..='\u{36F}';
+
+/// a character as one the font has, where it is another form of one: a
+/// letter without its marks, and a dash, a stroke or a quote of any kind as
+/// the plain one
+fn plain_char(c: char) -> char {
+    match c {
+        '\u{2010}'..='\u{2015}' => '-',
+        '\u{2018}' | '\u{2019}' | '\u{2032}' => '\'',
+        '\u{2044}' | '\u{2215}' | '\u{29F8}' | '\u{FF0F}' => '/',
+        '\u{FF1A}' => ':',
+        _ => {
+            let run = MARKED.partition_point(|&(from, _)| from <= c as u32).checked_sub(1);
+            run.map(|run| MARKED[run].1).filter(|&letter| letter != AS_IS).unwrap_or(c)
+        }
+    }
+}
+
+/// text as the font can show it: a name with accents is read without them,
+/// where it would be read with gaps
+pub fn plain(text: &str) -> String {
+    text.chars().filter(|c| !LOOSE_MARKS.contains(c)).map(plain_char).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_marked_letters_as_plain_ones() {
+        for (marked, read) in [
+            ("RÜFÜS DU SOL", "RUFUS DU SOL"),
+            ("Röyksopp & Róisín", "ROYKSOPP & ROISIN"),
+            ("Đen Vâu - Lối Nhỏ ft. Phương Anh Đào", "DEN VAU - LOI NHO FT. PHUONG ANH DAO"),
+            ("Mười Năm ft. Ngọc Linh", "MUOI NAM FT. NGOC LINH"),
+            ("Łódź, Dvořák, Ångström, façade, Straße", "LODZ, DVORAK, ANGSTROM, FACADE, STRASE"),
+        ] {
+            assert_eq!(plain(marked).to_uppercase(), read);
+        }
+    }
+
+    #[test]
+    fn drops_marks_written_after_their_letter_and_reads_other_dashes_and_strokes() {
+        assert_eq!(plain("Sin-e\u{301}, Beyonce\u{301}"), "Sin-e, Beyonce");
+        assert_eq!(plain("July\u{29F8}August \u{2013} it\u{2019}s"), "July/August - it's");
+    }
+
+    #[test]
+    fn leaves_what_it_has_no_plain_form_for() {
+        assert_eq!(plain("plain 123 (ok)"), "plain 123 (ok)");
+        assert_eq!(plain("秋川雅史 ǂ ʃ"), "秋川雅史 ǂ ʃ");
+    }
+
+    #[test]
+    fn every_letter_it_reads_as_has_a_glyph() {
+        let drawn = MARKED.iter().map(|&(_, letter)| letter).filter(|&letter| letter != AS_IS);
+        assert!(drawn.into_iter().all(|letter| glyph(letter) != [0; 7]));
+    }
+}

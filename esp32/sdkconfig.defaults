@@ -32,3 +32,10 @@ CONFIG_TINYUSB_RHPORT_HS=y
 # going out 4 KB at a time while touches come in, records arrive corrupt
 # in both directions about every other minute. seen on the full speed port
 CONFIG_TINYUSB_MODE_SLAVE=y
+# tinyusb's task on the core its interrupt is on, which is the main task's,
+# where the driver is installed. the usb driver keeps the interrupt out of
+# a transfer it is starting by stopping interrupts on the core it runs on:
+# started on the other core, the two write the same endpoint at once, and
+# a transfer is lost for good. usb.rs pins the threads of ours that start
+# transfers to the same core
+CONFIG_TINYUSB_TASK_AFFINITY_CPU0=y

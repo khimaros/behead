@@ -18,7 +18,7 @@ RPI_PHONE := $(RPI_CERTS)/10-phone
 RPI_CACHED := $(RPI_CERTS)/95-
 CERT_CACHE ?= $(HOME)/.cache/behead/certs
 # desktop sessions. SESSION is the one shown on the headunit, in place of the
-# demo; SESSIONS names more for `make rpi-image` to install beside it
+# demo; SESSIONS names more for `make image-rpi` to install beside it
 SESSION ?=
 SESSIONS ?=
 SESSIONS_DIR := sessions
@@ -51,7 +51,13 @@ WAYDROID_APPS := org.fdroid.fdroid net.osmand.plus
 APK_CACHE ?= $(HOME)/.cache/behead/apk/fdroid
 FETCH_FDROID ?= tools/fetch-fdroid.py
 PREINSTALL_APKS ?= tools/preinstall-apks.py
-RPI_TEST_DIR := tests/rpi
+# what is on the usb cable for test-device: rpi, a flashed pi showing the
+# demo, or esp32, a board whose firmware shows the launcher
+DEVICE ?= rpi
+DEVICE_NAMES := rpi esp32
+DEVICE_TEST_DIR := tests/device
+DEVICE_TESTS = $(if $(filter esp32,$(DEVICE)),test_firmware,test_device)
+check_device = $(if $(filter $(DEVICE_NAMES),$(DEVICE)),,$(error unknown device $(DEVICE): one of $(DEVICE_NAMES)))
 PYUSB := pyusb==1.3.1
 RASPI_PROVISION ?= cargo run --quiet --release --manifest-path $(abspath ../raspi-provision/Cargo.toml) --
 
@@ -64,9 +70,11 @@ ESP32_CACHED := $(CERT_CACHE)/carservice
 ESP32_PORT ?= high
 ESP32_SDKCONFIG := sdkconfig.defaults$(if $(filter full,$(ESP32_PORT)),;sdkconfig.full-speed)
 ESP32_CARGO = cd $(ESP32_DIR) && ESP_IDF_SDKCONFIG_DEFAULTS="$(ESP32_SDKCONFIG)" cargo
+# from esp32, where the firmware's tools are
+ESP32_ELF := target/riscv32imafc-esp-espidf/release/behead-esp32
 
-.PHONY: build build-rpi test test-e2e test-e2e-rpi vm test-vm demo rpi-certs rpi-sessions rpi-image rpi-flash rpi-deploy \
-	test-rpi demo-rpi esp32-certs build-esp32 esp32-flash precommit clean
+.PHONY: build build-rpi build-esp32 test test-e2e test-e2e-rpi vm test-vm demo-vm certs-rpi sessions-rpi image-rpi \
+	flash-rpi deploy-rpi certs-esp32 flash-esp32 monitor-esp32 test-device headunit precommit clean
 
 build:
 	cargo build
@@ -74,7 +82,7 @@ build:
 # the one phone certificate the esp32-p4 firmware is built with: PHONE_CERT
 # and PHONE_KEY, else the pair in CERT_CACHE, else a self-signed one, which
 # openauto accepts and a stricter car may not
-esp32-certs:
+certs-esp32:
 	mkdir -p $(dir $(ESP32_PHONE))
 	cert="$(or $(PHONE_CERT),$(wildcard $(ESP32_CACHED).crt))"; key="$(or $(PHONE_KEY),$(wildcard $(ESP32_CACHED).key))"; \
 	if [ -n "$$key" ]; then install -m 644 "$$cert" $(ESP32_PHONE).crt; install -m 600 "$$key" $(ESP32_PHONE).key; \
@@ -84,12 +92,17 @@ esp32-certs:
 
 # the firmware has its own toolchain and target (see esp32/README.md). the
 # first build fetches esp-idf, several gigabytes, into esp32/.embuild
-build-esp32: esp32-certs
+build-esp32: certs-esp32
 	$(ESP32_CARGO) build --release
 
-# write the firmware to a board on usb and show what it logs
-esp32-flash: build-esp32
+# write the firmware to a board on usb
+flash-esp32: build-esp32
 	$(ESP32_CARGO) run --release
+
+# show what the board logs, with addresses as the names in the firmware
+# built last. ctrl-c stops it
+monitor-esp32:
+	cd $(ESP32_DIR) && espflash monitor --elf $(ESP32_ELF)
 
 build-rpi:
 	rustup target add $(RPI_TARGET)
@@ -137,7 +150,7 @@ test-vm: build
 # instead of the demo. opens gvncviewer when installed, otherwise the browser
 DEMO_VNC = $(VM_ADDRESS):0
 DEMO_WEB = http://$(VM_ADDRESS):6080/vnc.html?autoconnect=1&resize=scale
-demo: build
+demo-vm: build
 	$(check_sessions)
 	$(call open_when_up,$(DEMO_WEB),$(if $(shell command -v gvncviewer),gvncviewer $(DEMO_VNC),xdg-open "$(DEMO_WEB)"))
 	incus exec $(VM) -t --env VIDEO_CMD="$(VIDEO_CMD)" --env SESSION="$(SESSION)" -- bash $(VM_TEST_DIR)/demo.sh
@@ -153,7 +166,7 @@ $(RPI_DIR)/customize.env:
 # follows it as a backup, kept in step with the cache on each build. a
 # certificate there without a key, as the root is, has nothing to present.
 # drop in any others by hand.
-rpi-certs:
+certs-rpi:
 	mkdir -p $(RPI_CERTS)
 	test -f $(RPI_SELF_SIGNED).key || openssl req -x509 -newkey rsa:2048 -nodes -days $(RPI_CERT_DAYS) \
 		-subj /O=behead-dev -keyout $(RPI_SELF_SIGNED).key -out $(RPI_SELF_SIGNED).crt
@@ -180,7 +193,7 @@ endif
 # with its apps put into the system image. SESSION becomes the video
 # command, in a session.env the service reads after behead.env; without one
 # the image shows the demo. whatever an earlier build chose is removed.
-rpi-sessions:
+sessions-rpi:
 	$(check_sessions)
 	rm -rf $(RPI_SESSIONS) $(RPI_SESSION_ENV) $(RPI_SESSION_DEPENDS)* $(RPI_SESSION_SOURCES)* \
 		$(RPI_SESSION_PREFERENCES)* $(RPI_WAYDROID)
@@ -208,35 +221,37 @@ endif
 # session has its own, so building one leaves the others to flash later
 RPI_HOSTNAME = $(shell sed -n 's/^CUSTOM_HOSTNAME=//p' $(RPI_DIR)/customize.env)
 RPI_IMAGE = images/$(RPI_HOSTNAME)-$(or $(SESSION),demo).img.gz
-rpi-image: build-rpi $(RPI_DIR)/customize.env rpi-certs rpi-sessions
+image-rpi: build-rpi $(RPI_DIR)/customize.env certs-rpi sessions-rpi
 	install -D -t $(RPI_DIR)/overlay/usr/local/bin $(RPI_BINS:%=$(RPI_BIN_DIR)/%)
 	cd $(RPI_DIR) && CMDLINE_EXTRA="$$(cat $(abspath $(RPI_SESSION_CMDLINE)))" $(RASPI_PROVISION) image $(RPI_IMAGE)
 
 # DESTRUCTIVE: write the image of SESSION, or the demo's, to the sdcard that
 # MOUNT_DEVICE names in rpi/customize.env
-rpi-flash:
+flash-rpi:
 	cd $(RPI_DIR) && $(RASPI_PROVISION) flash $(RPI_IMAGE)
 
 # copy freshly built binaries to a running pi and restart the service. they
 # land in the ram layer, so this leaves the card itself untouched: a reboot
 # returns to the binaries in the image. same login as raspi-provision.
 RPI_ADDRESS ?= $(shell sed -n 's/^ADDRESS=//p' $(RPI_DIR)/customize.env 2>/dev/null)
-rpi-deploy: build-rpi
+deploy-rpi: build-rpi
 	scp $(RPI_BINS:%=$(RPI_BIN_DIR)/%) root@$(RPI_ADDRESS):/tmp/
 	ssh root@$(RPI_ADDRESS) 'systemctl stop $(RPI_SERVICE) && cd /tmp && install -m 755 $(RPI_BINS) /usr/local/bin/ \
 		&& systemctl start $(RPI_SERVICE) && systemctl is-active $(RPI_SERVICE)'
 
-# laptop as headunit, against a flashed rpi4 connected by usb cable
-test-rpi:
+# laptop as headunit, against the DEVICE connected by usb cable
+test-device:
+	$(check_device)
 	$(if $(HEADED),$(call open_when_up,$(LOCAL_VIEWER),xdg-open $(LOCAL_VIEWER)))
-	cd $(RPI_TEST_DIR) && BEHEAD_HEADED=$(HEADED) uv run --no-project --with $(PYUSB) python -m unittest -v $(TESTS)
+	cd $(DEVICE_TEST_DIR) && BEHEAD_HEADED=$(HEADED) uv run --no-project --with $(PYUSB) python -m unittest -v \
+		$(or $(TESTS),$(DEVICE_TESTS))
 
-# the same rpi4 with the browser as its headunit: the pi's video on a page,
-# the mouse on the picture as a finger. ctrl-c stops it
-demo-rpi: HEADED = 1
-demo-rpi:
+# the browser as the headunit of whatever device is on the cable: its video
+# on a page, the mouse on the picture as a finger. ctrl-c stops it
+headunit: HEADED = 1
+headunit:
 	$(call open_when_up,$(LOCAL_VIEWER),xdg-open $(LOCAL_VIEWER))
-	cd $(RPI_TEST_DIR) && uv run --no-project --with $(PYUSB) python demo.py
+	cd $(DEVICE_TEST_DIR) && uv run --no-project --with $(PYUSB) python headunit.py
 
 precommit:
 	cargo fmt --check

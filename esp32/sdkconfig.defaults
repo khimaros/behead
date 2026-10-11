@@ -19,6 +19,11 @@ CONFIG_SPIRAM_SPEED_200M=y
 CONFIG_CACHE_L2_CACHE_256KB=y
 CONFIG_CACHE_L2_CACHE_LINE_128B=y
 
+# music files have long names, and not all of them in ascii: without these
+# the card's filesystem gives each as eight letters and three
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_API_ENCODING_UTF_8=y
+
 # the phone side of android auto is a usb device with one vendor interface,
 # on the high speed port
 CONFIG_TINYUSB_VENDOR_COUNT=1

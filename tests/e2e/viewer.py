@@ -1,6 +1,8 @@
 """headed mode for the tests: with BEHEAD_HEADED set, everything the scripted
 headunit receives plays live in a browser. ffmpeg decodes the h.264 to jpeg
 pictures, and the page reloads /frame.jpg each time the last one arrives.
+media audio goes out at /audio as the pcm it came in, for as long as the
+page listens, which it does from the first click or key.
 BEHEAD_HEADED is the port to serve on, or 1 for the default."""
 
 import atexit
@@ -28,7 +30,16 @@ KEYS = {"ArrowUp": 19, "ArrowDown": 20, "ArrowLeft": 21, "ArrowRight": 22, "Ente
 ROTARY = 65536
 # what a headunit has to advertise for the page's controls to reach the phone
 KEYCODES = sorted({*KEYS.values(), ROTARY})
-HELP = "mouse: finger. wheel: knob. arrows: tilt. enter: click. escape: back. h: home"
+HELP = "mouse: finger. wheel: knob. arrows: tilt. enter: click. escape: back. h: home. sound: after a click or a key"
+# what media audio is until a headunit says: its rate and channels
+AUDIO_FORMAT = (48000, 2)
+SAMPLE_BYTES = 2
+# pieces of sound kept for a page that reads slowly. more than that are
+# dropped, so a slow browser never holds up a test
+AUDIO_BACKLOG = 50
+# seconds the page starts a piece of sound ahead of now, which evens out
+# how pieces arrive, and how far ahead it may get before it drops one
+AUDIO_LEAD, AUDIO_LIMIT = 0.1, 1
 PAGE = f"""<!doctype html><title>behead headunit</title>
 <body style="margin:0;background:#000;display:flex;justify-content:center;align-items:center;height:100vh">
 <p id="waiting" style="color:#888;font:16px sans-serif">waiting for video</p>
@@ -64,6 +75,45 @@ onkeydown = (event) => button(event, 1);
 onkeyup = (event) => button(event, 0);
 // one notch of the wheel is one detent of the knob
 onwheel = (event) => fetch(`/turn?delta=${{Math.sign(event.deltaY)}}`);
+// sound: /audio is pcm without end, played a piece at a time, each where the
+// last one stops. a browser plays nothing before a click or a key
+let sound;
+const play = (bytes, frames, rate, channels, due) => {{
+  const samples = new Int16Array(bytes.buffer, 0, frames * channels);
+  const piece = sound.createBuffer(channels, frames, rate);
+  for (let channel = 0; channel < channels; channel++) {{
+    const data = piece.getChannelData(channel);
+    for (let frame = 0; frame < frames; frame++) data[frame] = samples[frame * channels + channel] / 32768;
+  }}
+  const source = sound.createBufferSource();
+  source.buffer = piece;
+  source.connect(sound.destination);
+  source.start(due);
+}};
+const listen = async () => {{
+  if (sound) return;
+  sound = new AudioContext();
+  const response = await fetch("/audio");
+  const rate = +response.headers.get("X-Rate"), channels = +response.headers.get("X-Channels");
+  const reader = response.body.getReader(), frame = {SAMPLE_BYTES} * channels;
+  let due = 0, held = new Uint8Array(0);
+  for (;;) {{
+    const {{ value, done }} = await reader.read();
+    if (done) break;
+    const bytes = new Uint8Array(held.length + value.length);
+    bytes.set(held);
+    bytes.set(value, held.length);
+    const frames = Math.floor(bytes.length / frame);
+    held = bytes.slice(frames * frame);
+    // a page that fell behind skips sound to catch up
+    if (!frames || due > sound.currentTime + {AUDIO_LIMIT}) continue;
+    due = Math.max(due, sound.currentTime + {AUDIO_LEAD});
+    play(bytes, frames, rate, channels, due);
+    due += frames / rate;
+  }}
+}};
+addEventListener("pointerdown", listen);
+addEventListener("keydown", listen);
 </script></body>""".encode()
 READ_CHUNK = 65536
 
@@ -96,6 +146,8 @@ class Viewer:
         self.touches = queue.SimpleQueue()
         # ("button", key code, pressed) and ("turn", key code, detents), likewise
         self.controls = queue.SimpleQueue()
+        # the pages listening to the sound, each with the pieces it has yet to get
+        self.audio_format, self.listeners = AUDIO_FORMAT, []
         threading.Thread(target=self.collect, daemon=True).start()
         server = http.server.ThreadingHTTPServer(("", port), self.handler())
         threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -115,6 +167,15 @@ class Viewer:
         except (BlockingIOError, BrokenPipeError):
             pass
 
+    def play(self, rate, channels, pcm):
+        """pass on media audio, signed 16 bit little endian, to every page listening"""
+        self.audio_format = (rate, channels)
+        for listener in list(self.listeners):
+            try:
+                listener.put_nowait(pcm)
+            except queue.Full:
+                pass
+
     def collect(self):
         buffer = b""
         while chunk := self.decoder.stdout.read1(READ_CHUNK):
@@ -129,9 +190,28 @@ class Viewer:
             def log_message(self, *args):
                 pass
 
+            def stream_audio(self):
+                """the sound from now on, until the page goes away"""
+                listener = queue.Queue(AUDIO_BACKLOG)
+                viewer.listeners.append(listener)
+                rate, channels = viewer.audio_format
+                self.send_response(200)
+                for name, value in (("Content-Type", "application/octet-stream"), ("Cache-Control", "no-store"),
+                                    ("X-Rate", rate), ("X-Channels", channels)):
+                    self.send_header(name, str(value))
+                self.end_headers()
+                try:
+                    while True:
+                        self.wfile.write(listener.get())
+                        self.wfile.flush()
+                except OSError:
+                    viewer.listeners.remove(listener)
+
             def do_GET(self):
                 url = urllib.parse.urlparse(self.path)
                 query = {name: values[0] for name, values in urllib.parse.parse_qs(url.query).items()}
+                if url.path == "/audio":
+                    return self.stream_audio()
                 if url.path == "/touch":
                     viewer.touches.put((query["action"], int(query["x"]), int(query["y"])))
                 elif url.path == "/button":

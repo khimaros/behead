@@ -29,7 +29,7 @@ RUN apt-get update && \
     ln -sfn libaasdk.so.4         /usr/lib/libaasdk.so.2026 && \
     ln -sfn libaap_protobuf.so.4  /usr/lib/libaap_protobuf.so.2026
 
-# for `make demo`: vnc on the virtual display, and novnc to reach it from a browser
+# for `make demo-vm`: vnc on the virtual display, and novnc to reach it from a browser
 RUN apt-get update && \
     apt-get -yq install --no-install-recommends x11vnc novnc python3-websockify && \
     apt-get clean && \

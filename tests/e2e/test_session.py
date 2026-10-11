@@ -92,8 +92,8 @@ def make_cert(directory, name):
 
 
 def make_rpi_certs(certs, cache):
-    """the pi image's certificate directory, collected by `make rpi-certs`"""
-    run("make", "-C", ROOT, "rpi-certs", f"RPI_CERTS={certs}", f"CERT_CACHE={cache}")
+    """the pi image's certificate directory, collected by `make certs-rpi`"""
+    run("make", "-C", ROOT, "certs-rpi", f"RPI_CERTS={certs}", f"CERT_CACHE={cache}")
 
 
 def make_expired_cert(directory, name):
@@ -162,7 +162,9 @@ def count_frames(path):
     return int(out.stdout.strip().strip(","))
 
 
-class SessionTest(unittest.TestCase):
+class ServerTest(unittest.TestCase):
+    """the server running, and a scripted headunit to connect to it"""
+
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
@@ -229,6 +231,8 @@ class SessionTest(unittest.TestCase):
             seen += os.read(stream.fileno(), 4096)
         return seen
 
+
+class SessionTest(ServerTest):
     def test_negotiates_and_streams_video(self):
         headunit = self.connect()
         headunit.run_until(lambda: len(headunit.frames) == FRAME_COUNT)
@@ -669,11 +673,11 @@ class SessionTest(unittest.TestCase):
     @unittest.skipUnless(GOOGLE_CA and all(GOOGLE_PAIR),
                          "set BEHEAD_GOOGLE_CA, and BEHEAD_GOOGLE_CERT and BEHEAD_GOOGLE_KEY to a google signed pair")
     def test_a_car_trusting_google_falls_back_to_the_google_signed_certificate(self):
-        """the pi image's certificate directory, as `make rpi-certs` builds it
+        """the pi image's certificate directory, as `make certs-rpi` builds it
         from a cache holding the root and the google signed pair: the
         self-signed pair first, which a strict car refuses, then the google
         signed one, which it accepts and keeps"""
-        certs, cache = self.dir / "rpi-certs", self.dir / "cache"
+        certs, cache = self.dir / "certs-rpi", self.dir / "cache"
         cache.mkdir(exist_ok=True)
         for source, name in zip((GOOGLE_CA, *GOOGLE_PAIR), ("ca.crt", "carservice.crt", "carservice.key")):
             shutil.copy(source, cache / name)

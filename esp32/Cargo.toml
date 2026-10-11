@@ -26,6 +26,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(esp_idf_tinyusb_rhport_hs)
 [dependencies]
 aap = { path = "../crates/aap" }
 behead-demo = { path = "../crates/demo" }
+behead-launcher = { path = "../crates/launcher" }
 behead-link = { path = "../crates/link" }
 # without binstart: main.rs has the entry point, and says why
 esp-idf-svc = { version = "0.53", default-features = false, features = ["std"] }

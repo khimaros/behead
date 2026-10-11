@@ -5,7 +5,7 @@ After=sys-kernel-config.mount overlay-firstboot.service
 
 [Service]
 EnvironmentFile=/etc/behead/behead.env
-# written by `make rpi-image SESSION=...`: the session to show in place of
+# written by `make image-rpi SESSION=...`: the session to show in place of
 # the default video command
 EnvironmentFile=-/etc/behead/session.env
 # the home sessions give their applications, which /etc/persist.d/behead

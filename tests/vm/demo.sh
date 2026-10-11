@@ -10,7 +10,7 @@ SERVER=$REPO/target/debug/behead
 export PATH=$REPO/target/debug:$PATH
 CONTAINER=behead-openauto
 WORK=$(mktemp -d)
-# `make demo` has checked that SESSION names a session
+# `make demo-vm` has checked that SESSION names a session
 [ -z "${SESSION:-}" ] || VIDEO_CMD="$REPO/sessions/$SESSION.sh {width} {height} {fps}"
 VIDEO_CMD=${VIDEO_CMD:-$(sed -n 's/^VIDEO_CMD="\(.*\)"$/\1/p' "$REPO/rpi/overlay/etc/behead/behead.env")}
 ADDRESS=$(ip -4 -o addr show scope global | awk '$2 != "podman0" {sub("/.*", "", $4); print $4; exit}')

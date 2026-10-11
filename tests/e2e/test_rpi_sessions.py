@@ -1,4 +1,4 @@
-"""end-to-end: the desktop sessions `make rpi-sessions` puts in the pi image"""
+"""end-to-end: the desktop sessions `make sessions-rpi` puts in the pi image"""
 
 import pathlib
 import re
@@ -52,8 +52,8 @@ class RpiSessions(unittest.TestCase):
         return path
 
     def collect(self, **chosen):
-        """run `make rpi-sessions`, as `make rpi-image` does, with SESSION and SESSIONS as given"""
-        run("make", "-C", ROOT, "rpi-sessions", f"RPI_SESSIONS={self.scripts}", f"RPI_SESSION_ENV={self.env}",
+        """run `make sessions-rpi`, as `make image-rpi` does, with SESSION and SESSIONS as given"""
+        run("make", "-C", ROOT, "sessions-rpi", f"RPI_SESSIONS={self.scripts}", f"RPI_SESSION_ENV={self.env}",
             f"RPI_DEPENDS={self.depends}", f"RPI_APT_SOURCES={self.sources}", f"RPI_WAYDROID={self.android}",
             f"RPI_SESSION_CMDLINE={self.cmdline}", f"WAYDROID_CACHE={self.dir / 'cache'}",
             f"APK_CACHE={self.apk_cache}", f"FETCH_WAYDROID={self.fetch}", f"FETCH_FDROID={self.fetch_app}",
@@ -210,18 +210,18 @@ class RpiSessions(unittest.TestCase):
         self.assertEqual(list(self.sources.glob(f"{DEPENDS_PREFIX}*")), [])
 
     def test_each_session_has_an_image_of_its_own(self):
-        """`make rpi-image` has raspi-provision write a gzip image named by
+        """`make image-rpi` has raspi-provision write a gzip image named by
         the session, which leaves the other sessions' images in place, and
-        `make rpi-flash` hands the same one to `raspi-provision flash`"""
+        `make flash-rpi` hands the same one to `raspi-provision flash`"""
         asked = self.dir / "asked"
         provision = self.stub("provision", f'#!/bin/sh\necho "$(basename "$PWD") $*" >> {asked}\n')
         for session, name in (("phosh", "phosh"), ("", "demo")):
             image = f"images/{HOSTNAME}-{name}.img.gz"
             chosen = (f"RPI_HOSTNAME={HOSTNAME}", f"SESSION={session}", f"RASPI_PROVISION={provision}")
-            planned = subprocess.run(["make", "-n", "-C", ROOT, "rpi-image", *chosen], check=True,
+            planned = subprocess.run(["make", "-n", "-C", ROOT, "image-rpi", *chosen], check=True,
                                      capture_output=True, text=True).stdout
             self.assertRegex(planned, rf"(?m)^cd rpi && .*{provision} image {image}$")
-            run("make", "-C", ROOT, "rpi-flash", *chosen)
+            run("make", "-C", ROOT, "flash-rpi", *chosen)
             self.assertEqual(asked.read_text().splitlines()[-1], f"rpi flash {image}")
 
     def test_unknown_session_fails_the_build(self):

@@ -3,7 +3,7 @@ target = "riscv32imafc-esp-espidf"
 
 [target.riscv32imafc-esp-espidf]
 linker = "ldproxy"
-runner = "espflash flash --monitor"
+runner = "espflash flash"
 rustflags = ["--cfg", "espidf_time64"]
 
 # the target has no prebuilt standard library

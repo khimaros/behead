@@ -11,7 +11,7 @@
 
 mod wayland;
 
-use behead_demo::{apply, render, up_or_down, Canvas, State, BAR_HEIGHT, BAR_WIDTH};
+use behead_demo::{apply, next_due, render, up_or_down, Canvas, State, BAR_HEIGHT, BAR_WIDTH};
 use std::io::{BufRead, Write};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -122,31 +122,5 @@ fn run_pipe(width: u32, height: u32, fps: u32) {
         }
         due = next_due(due, period, Instant::now());
         std::thread::sleep(due.saturating_duration_since(Instant::now()));
-    }
-}
-
-/// when the next frame is due: one period after the last, so a slow frame
-/// does not shift the rest, unless that moment has already passed. a live
-/// screen skips frames it fell behind on rather than sending them in a burst,
-/// which is what happened while the encoder started up.
-fn next_due(last: Instant, period: Duration, now: Instant) -> Instant {
-    (last + period).max(now)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn keeps_a_steady_cadence() {
-        let (start, period) = (Instant::now(), Duration::from_millis(33));
-        assert_eq!(next_due(start, period, start + Duration::from_millis(5)), start + period);
-    }
-
-    #[test]
-    fn skips_frames_it_fell_behind_on_instead_of_bursting() {
-        let (start, period) = (Instant::now(), Duration::from_millis(33));
-        let late = start + period * 5;
-        assert_eq!(next_due(start, period, late), late);
     }
 }

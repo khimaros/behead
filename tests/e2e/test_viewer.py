@@ -3,6 +3,7 @@ what the page asks for over http has to come out as input for a headunit"""
 
 import atexit
 import socket
+import time
 import unittest
 import urllib.request
 
@@ -40,6 +41,27 @@ class ViewerControls(unittest.TestCase):
         asked = [self.viewer.controls.get(timeout=fakehu.TIMEOUT) for _ in range(3)]
         self.assertEqual(asked, [("button", fakehu.DPAD_LEFT, True), ("button", fakehu.DPAD_LEFT, False),
                                  ("turn", fakehu.ROTARY, -2)])
+
+    def test_what_the_car_plays_reaches_a_page_that_listens(self):
+        self.viewer.play(44100, 1, b"before anyone listened")
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/audio", timeout=fakehu.TIMEOUT) as response:
+            self.assertEqual((response.headers["X-Rate"], response.headers["X-Channels"]), ("44100", "1"))
+            for piece in (b"\x01\x02\x03\x04", b"\x05\x06"):
+                self.viewer.play(44100, 1, piece)
+            self.assertEqual(response.read(6), b"\x01\x02\x03\x04\x05\x06", "the sound from when it began to listen")
+        # a page that left is found out by the next piece it cannot be sent
+        deadline = time.monotonic() + fakehu.TIMEOUT
+        while self.viewer.listeners and time.monotonic() < deadline:
+            self.viewer.play(44100, 1, bytes(viewer.READ_CHUNK))
+            time.sleep(0.05)
+        self.assertEqual(self.viewer.listeners, [])
+
+    def test_a_page_that_reads_too_slowly_loses_sound_and_holds_nothing_up(self):
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/audio", timeout=fakehu.TIMEOUT):
+            started = time.monotonic()
+            for _ in range(viewer.AUDIO_BACKLOG * 20):
+                self.viewer.play(48000, 2, bytes(viewer.READ_CHUNK))
+            self.assertLess(time.monotonic() - started, 1)
 
     def test_the_page_offers_every_key_the_headunit_should_advertise(self):
         """a car only gets bound the keys it listed, so the page's keys and

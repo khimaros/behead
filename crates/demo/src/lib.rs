@@ -4,12 +4,11 @@
 
 mod font;
 mod packed;
-mod tone;
 
 pub use packed::Packed;
 use std::collections::{BTreeMap, VecDeque};
 use std::ops::Range;
-pub use tone::Tone;
+use std::time::{Duration, Instant};
 
 const BACKGROUND: [u8; 3] = [24, 28, 36];
 const TEXT: [u8; 3] = [230, 230, 230];
@@ -34,7 +33,10 @@ const LOG_LINE_HEIGHT: u32 = (font::HEIGHT + 3) * LOG_SCALE;
 const LOG_COLUMNS: usize = 64;
 const WAITING: &str = "PRESS A BUTTON OR TURN THE KNOB";
 /// android's key code for a rotary controller, whose turns arrive as relative events
-const ROTARY: u32 = 65536;
+pub const ROTARY: u32 = 65536;
+/// how far one character of text is from the next, and how tall, at scale 1
+pub const ADVANCE: u32 = font::WIDTH + 1;
+pub const GLYPH_HEIGHT: u32 = font::HEIGHT;
 pub const BAR_HEIGHT: u32 = 24;
 pub const BAR_WIDTH: u32 = 16;
 /// seconds the timing bar takes to cross the screen
@@ -70,6 +72,14 @@ impl State {
     }
 }
 
+/// when the next frame is due: one period after the last, so a slow frame
+/// does not shift the rest, unless that moment has already passed. a live
+/// screen skips frames it fell behind on rather than sending them in a burst,
+/// which is what happened while the encoder started up.
+pub fn next_due(last: Instant, period: Duration, now: Instant) -> Instant {
+    (last + period).max(now)
+}
+
 /// the part of a span that lies within a limit
 fn clip(start: i64, length: u32, limit: u32) -> Range<usize> {
     start.clamp(0, limit as i64) as usize..(start + length as i64).clamp(0, limit as i64) as usize
@@ -88,7 +98,7 @@ pub trait Surface {
 
     fn text(&mut self, x: i64, y: i64, scale: u32, colour: [u8; 3], text: &str) {
         for (index, c) in text.chars().enumerate() {
-            let left = x + (index as u32 * (font::WIDTH + 1) * scale) as i64;
+            let left = x + (index as u32 * ADVANCE * scale) as i64;
             for (row, bits) in font::glyph(c).iter().enumerate() {
                 for column in (0..font::WIDTH).filter(|column| bits & (1 << (font::WIDTH - 1 - column)) != 0) {
                     let (px, py) = (left + (column * scale) as i64, y + (row as u32 * scale) as i64);
@@ -133,7 +143,8 @@ impl Surface for Canvas {
     }
 }
 
-fn parse_point(token: &str) -> Option<(u32, (u32, u32))> {
+/// a finger in a line of server input: which, and where
+pub fn parse_point(token: &str) -> Option<(u32, (u32, u32))> {
     let (id, position) = token.split_once(':')?;
     let (x, y) = position.split_once(',')?;
     Some((id.parse().ok()?, (x.parse().ok()?, y.parse().ok()?)))
@@ -271,6 +282,19 @@ mod tests {
     fn pixel(canvas: &Canvas, x: u32, y: u32) -> [u8; 3] {
         let offset = ((y * canvas.width + x) * 3) as usize;
         canvas.pixels[offset..offset + 3].try_into().unwrap()
+    }
+
+    #[test]
+    fn keeps_a_steady_cadence() {
+        let (start, period) = (Instant::now(), Duration::from_millis(33));
+        assert_eq!(next_due(start, period, start + Duration::from_millis(5)), start + period);
+    }
+
+    #[test]
+    fn skips_frames_it_fell_behind_on_instead_of_bursting() {
+        let (start, period) = (Instant::now(), Duration::from_millis(33));
+        let late = start + period * 5;
+        assert_eq!(next_due(start, period, late), late);
     }
 
     #[test]

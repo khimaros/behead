@@ -1,0 +1,16 @@
+[package]
+name = "behead-launcher"
+description = "a launcher for the car's screen, with a music player"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+behead-demo = { path = "../demo" }
+claxon = "0.4"
+# without its simd crate: the esp32-p4 has none to use
+nanomp3-core = { version = "0.2", default-features = false }
+# in whole numbers, which on the esp32-p4 came out a little faster than
+# counting in fractions: 65% of the music's speed against 57, before the
+# firmware stopped drawing pictures it already had
+opuscule = { version = "0.2", features = ["fixed-point"] }

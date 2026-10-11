@@ -136,7 +136,7 @@ latest of each kind the car sent before.
 ## try it
 
     make vm      # once: the test vm, with openauto inside
-    make demo
+    make demo-vm
 
 this runs the server on the vm's usb gadget with openauto as the headunit,
 and opens openauto's screen in gvncviewer when it is installed, otherwise
@@ -144,7 +144,7 @@ in the browser, to drive with the mouse and keyboard. `OPEN=` leaves that
 to you: the url is printed, and vnc listens on port 5900. touch and button
 events reaching the server are printed in the terminal. ctrl-c stops it.
 
-`make demo SESSION=phosh` shows the phosh shell instead, `SESSION=kodi`
+`make demo-vm SESSION=phosh` shows the phosh shell instead, `SESSION=kodi`
 kodi, and `SESSION=wayland` the demo as a wayland client.
 
 the screen is drawn by `behead-demo`, a small program that shows what the
@@ -161,7 +161,7 @@ car negotiated and reacts to its input:
   anything the server could not read, as `UNKNOWN` with its bytes
 
 openauto's keys: enter, the arrow keys, escape (back) and h (home) send the
-matching android auto buttons. `VIDEO_CMD=... make demo` swaps the demo for
+matching android auto buttons. `VIDEO_CMD=... make demo-vm` swaps the demo for
 another video command. stop the demo before `make test-vm`; both need the
 vm's usb gadget.
 
@@ -307,16 +307,16 @@ the image is built by [raspi-provision](../raspi-provision), checked out next
 to this repo. it runs from a read-only root, so cutting power does not
 corrupt the card.
 
-    make rpi-image                       # builds rpi/images/behead-demo.img.gz
+    make image-rpi                       # builds rpi/images/behead-demo.img.gz
     $EDITOR rpi/customize.env            # set MOUNT_DEVICE to the sdcard
-    make rpi-flash                       # DESTRUCTIVE: writes MOUNT_DEVICE
+    make flash-rpi                       # DESTRUCTIVE: writes MOUNT_DEVICE
 
 settings live in `rpi/customize.env`, created from `customize.env.example` on
 the first build. both targets run raspi-provision straight from its
 checkout; the `raspi-provision` commands shown further down need it
 installed (`make install` in that repo). the image is named after the
 hostname and the session it shows, `-demo` without one, so images of several
-sessions can sit side by side. give `make rpi-flash` the same `SESSION` to
+sessions can sit side by side. give `make flash-rpi` the same `SESSION` to
 write that one.
 
 the packages in `rpi/depends`, ffmpeg for the default video command, are
@@ -326,7 +326,7 @@ build slow; later builds reuse the downloaded packages.
 
 to try a change on a running pi without reflashing:
 
-    make rpi-deploy      # cross-builds, copies both binaries, restarts the service
+    make deploy-rpi      # cross-builds, copies both binaries, restarts the service
 
 the copies live in the ram layer, so a reboot returns to the image's
 binaries. it logs in as raspi-provision does (root at `ADDRESS` from
@@ -339,8 +339,8 @@ demo.
 
 to put a desktop session on the headunit instead, name it when building:
 
-    make rpi-image SESSION=phosh                 # wayland, kodi, phosh or waydroid
-    make rpi-image SESSION=kodi SESSIONS=phosh   # kodi shown, phosh installed beside it
+    make image-rpi SESSION=phosh                 # wayland, kodi, phosh or waydroid
+    make image-rpi SESSION=kodi SESSIONS=phosh   # kodi shown, phosh installed beside it
 
 `SESSION` is the session shown, and `SESSIONS` installs more to switch to
 on the device. each brings the packages listed for it in `sessions/depends`.
@@ -386,7 +386,7 @@ the service offers the car every `NAME.crt` and `NAME.key` pair in
 `/etc/behead/certs`, in name order, until one is accepted. the image always
 carries a self-signed pair, `90-self-signed`. supply your own as `10-phone`:
 
-    make rpi-image PHONE_CERT=phone.crt PHONE_KEY=phone.key
+    make image-rpi PHONE_CERT=phone.crt PHONE_KEY=phone.key
 
 every pair [dexter](../dexter) left in `~/.cache/behead/certs` (see
 [test](#test); `CERT_CACHE=...` for another directory) is added behind the
@@ -404,23 +404,58 @@ needs under load; power it through the gpio header if it browns out.
 
 ## esp32-p4
 
-`esp32` holds firmware that makes an esp32-p4 the phone, showing the demo
-through the chip's own h.264 encoder. it runs on a board, at up to
-1280x720 and 30 pictures a second, and has shown the demo in a van:
+`esp32` holds firmware that makes an esp32-p4 the phone, showing the
+launcher below through the chip's own h.264 encoder, with the music of a
+microsd card as the car's sound. it runs on a board, at up to 1280x720 and
+30 pictures a second, and an earlier build has shown the demo in a van:
 
     make build-esp32     # needs espressif's rust toolchain, from espup
-    make esp32-flash     # write it to a board on usb and show its log
+    make flash-esp32     # write it to a board on usb
+    make monitor-esp32   # show what the board logs
+    make test-device DEVICE=esp32   # laptop as headunit, against the board
 
 `ESP32_PORT=full` puts the phone on the chip's full speed usb port.
 
+the card is fat32 (not exfat, which larger cards come as), with mp3, flac,
+opus and wav files in folders or not, and has to be in the board when it
+starts.
+
 see [esp32/README.md](esp32/README.md) for what it needs and what it lacks.
+
+## launcher
+
+`behead-launcher` is a video source like `behead-demo`, made for the car: a
+home screen with two tiles, MUSIC and INPUTS. it is what the esp32-p4
+firmware shows, and runs on linux too:
+
+    mkfifo /tmp/behead-audio
+    behead --cert phone.crt --key phone.key --audio-cmd 'cat /tmp/behead-audio' \
+        --video-cmd 'behead-launcher --width {width} --height {height} --fps {fps} \
+            --music ~/Music --audio /tmp/behead-audio | ffmpeg -loglevel error -f rawvideo \
+            -pix_fmt rgb24 -s {width}x{height} -r {fps} -i - -pix_fmt yuv420p -c:v libx264 \
+            -preset ultrafast -tune zerolatency -profile:v baseline -g {fps} -f h264 -'
+
+- MUSIC lists the folders and the mp3, flac, opus and wav files under `--music`,
+  by file name. a touch on a folder opens it, and on a track plays it, or
+  pauses the one playing. tracks follow each other in the order listed, on
+  into the next folder. BACK leaves a folder, UP and DOWN move the list a
+  page, and PREV, PLAY or PAUSE and NEXT are under it.
+- INPUTS is the demo's screen, for trying a car's controls.
+- without a touchscreen: the knob, or the arrow keys, moves along the tiles
+  and the list, a click chooses, the car's back button leaves a folder or a
+  screen, and home returns to the tiles. the car's play, pause, next and
+  previous keys work on every screen.
+
+names are shown in capitals, with digits and common punctuation. other
+characters, accented letters among them, show as blanks.
 
 ## test
 
     make test-e2e    # tcp, no root
     make vm          # create the test vm, once
     make test-vm     # usb gadget, pi service, openauto and desktop tests in the vm
-    make test-rpi    # laptop as headunit, against a pi on a usb cable
+    make test-device               # laptop as headunit, against a pi on a usb cable
+    make test-device DEVICE=esp32  # the same against an esp32-p4
 
 the tests run headless. `HEADED=1` shows what the scripted headunit
 receives, live in the browser, which opens by itself (`OPEN=` to not), and
@@ -428,14 +463,17 @@ receives, live in the browser, which opens by itself (`OPEN=` to not), and
 
     make test-vm HEADED=1 TESTS=test_phosh
 
-`make test-rpi` needs the udev rule in `tests/rpi/70-behead.rules`
-installed on the laptop, and the pi's usb-c port cabled to it. it also
-prints the pi's touch to picture latency.
+`make test-device` needs the udev rule in `tests/device/70-behead.rules`
+installed on the laptop, and the device's usb port cabled to it. it also
+prints the device's touch to picture latency.
 
-`make demo-rpi` makes the browser the pi's headunit: its video on a page,
+`make headunit` makes the browser the headunit of whatever device is on
+the cable, a pi or an esp32-p4: its video on a page,
 which opens by itself, and the mouse on the picture as a finger. the mouse
 wheel turns a rotary knob, the arrow keys tilt it and enter clicks it;
-escape is back and h is home. ctrl-c stops it.
+escape is back and h is home. ctrl-c stops it. the page plays the device's
+media audio too, from the first click or key on it, which a browser waits
+for before it makes a sound. the same goes for the page behind `HEADED=1`.
 
 three tests check the phone certificate the way a strict car would, against
 google's automotive link root, and skip unless given it. one walks the pi

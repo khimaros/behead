@@ -37,8 +37,8 @@ rustls endpoint, the encoder child process, and input delivery.
 has a target and a toolchain of its own. it is the same three layers on
 other ground: `aap` and `crates/link` unchanged, tinyusb where linux has
 functionfs, mbedtls where linux has rustls (ring has no 32 bit risc-v
-support), and `crates/demo`'s drawing fed to the chip's h.264 encoder where
-linux pipes a command into x264. the demo draws on a `Surface`, which is
+support), and `crates/launcher`'s drawing fed to the chip's h.264 encoder
+where linux pipes a command into x264. the launcher draws on a `Surface`, which is
 rgb on linux and the encoder's packed yuv on the chip: making that yuv of
 an rgb picture, on the cpu or in the chip's pixel accelerator, took longer
 than drawing and encoding together. it uses esp-idf through `esp-idf-sys`, since the
@@ -359,7 +359,7 @@ itself. every fix costs a `waydroid shell`, fine at a car's one per second.
 and reacts to the input lines on stdin. each frame is due one period after the
 last; when it falls behind (the encoder starting up blocks its first writes) it
 skips ahead rather than sending the frames it missed in a burst. ffmpeg encodes
-its output. it is the default video command on the rpi image and in `make demo`,
+its output. it is the default video command on the rpi image and in `make demo-vm`,
 and the end-to-end tests use it to check the whole loop: a touch from the
 headunit has to come back as a marker at the same place in the video.
 
@@ -371,6 +371,51 @@ crate meant to stay small. `libc` is needed only to pass the shared memory
 file descriptor (sendmsg with SCM_RIGHTS), which stable rust does not expose.
 the uinput tests run it in the kiosk session, so the same marker check covers
 uinput, libinput, the compositor and screen capture.
+
+## launcher
+
+`crates/launcher` is an application made for the car's screen and for the
+smallest host, the esp32-p4: a home screen of tiles, a music player, and
+the demo as an input test. it is a library, which the firmware links, and
+`behead-launcher`, a video source like `behead-demo` for linux, which is
+what the end-to-end tests run. three parts:
+
+- the screens (`lib.rs`). `App` takes the server's input lines and draws on
+  a `Surface`. a screen's buttons are one list of areas with what each
+  does, which both the drawing and the touches read, so a button is where
+  it is drawn. sizes are in units of a 160th of the screen's height, which
+  gives the same layout at 480 and at 720 lines. every screen works by
+  touch and by a knob with a back button: a turn moves along the tiles or
+  the list, a click chooses, and the car's media keys work the player from
+  any screen.
+- the library (`library.rs`). the card is read once, into a sorted list of
+  paths, and the folders shown are read back out of the paths. no tags are
+  read: a track is called what its file is. tracks play on in that order,
+  from one folder into the next.
+- the player (`player.rs`, `decode.rs`). `Player` is the controls: what
+  plays, paused or not. the screen and the keys change it under a lock held
+  for an instant. `Source` is where sound is pulled from, a packet at a
+  time, by one thread, which is the one that opens files and decodes: a
+  slow card delays neither a picture nor a button. wav is read by the
+  crate, mp3 by `nanomp3-core`, flac by `claxon` and opus by `opuscule`
+  (`opus.rs`, with the ogg pages opus files come in read by the crate), all
+  plain rust with no dependencies of their own, which build for the chip
+  and for linux alike. a source's sound is made the headunit's rate by
+  drawing a line between samples, cheap enough for the chip.
+- `App::shows` gives a number that changes when the picture would. the
+  firmware draws a picture only then, and otherwise hands the encoder the
+  one it has. on the esp32-p4 that is what lets opus play: a picture drawn
+  goes through the cache the decoder's code and memory are behind, and
+  with one drawn 30 times a second opus decoded at 0.8 times the speed it
+  is heard at. with pictures drawn as they change it is 1.6 times, and
+  with nothing else running 5.7 (mp3: 18.6).
+
+on linux the picture goes to stdout and the sound to a named pipe, which
+the server's `--audio-cmd` reads with `cat`. opening the pipe waits for a
+reader, so the launcher sends sound exactly while a car wants it. in the
+firmware the same `Source` feeds the session's media audio, and the card is
+a fat filesystem on the chip's sd host (`esp32/src/card.rs`), which rust's
+`std::fs` reads like any other.
 
 ## transports
 
@@ -422,14 +467,16 @@ manual `behead teardown`, removes it.
    (`incant.yaml`). the kernel `dummy_hcd` controller loops the gadget back
    to a host port in the same vm, and the test plays the headunit through
    pyusb, including the accessory switch, unplug, teardown and crash recovery.
-2. `make test-rpi`: the laptop plays the headunit, through the same scripted
+2. `make test-device`: the laptop plays the headunit, through the same scripted
    headunit and pyusb, against a flashed rpi4 on a usb cable. checks that
    video decodes and arrives at a steady 30 frames per second, at 480p and
    720p, and that a bus reset is survived, and measures touch to picture:
    33 ms on the pi, one frame, as in the vm. passes on an rpi4.
    `tests/vm/test_service.py` runs the same device tests inside the vm
    against the systemd unit from `rpi/overlay`, including the hand-over of
-   the usb controller with `g_ether`.
+   the usb controller with `g_ether`. `DEVICE=esp32` runs them against
+   an esp32-p4 (`tests/device/test_firmware.py`), opening the launcher's input
+   test for the latency, and plays the card's first track if there is one.
 3. `tests/vm/test_openauto.py` (part of `make test-vm`): openauto, an
    independent headunit implementation, runs in a container inside the vm
    on a virtual display and drives the server over the usb gadget. checks
@@ -463,12 +510,12 @@ certificate at all.
 ## rpi4 image
 
 `rpi/` is a raspi-provision project: it holds only what differs from that
-framework's base image. `make rpi-image` cross-compiles a static aarch64
+framework's base image. `make image-rpi` cross-compiles a static aarch64
 binary (musl, built with clang and rust-lld, so no arm gcc toolchain and no
 dependence on the image's glibc), installs it into `rpi/overlay`, and runs
 `raspi-provision image` with a path of the session's own,
 `rpi/images/<hostname>-<session>.img.gz`, so each session's image stays
-until that session is built again. `make rpi-flash SESSION=` hands the same
+until that session is built again. `make flash-rpi SESSION=` hands the same
 path to `raspi-provision flash`, which decompresses it onto the card.
 
 - `overlay/etc/systemd/system/behead.service` runs the server on boot
@@ -477,13 +524,13 @@ path to `raspi-provision flash`, which decompresses it onto the card.
   image in a one-off qemu boot
 - `OVERLAY=tmpfs`: the root is read-only with a ram upper layer
 
-`make rpi-sessions`, part of `make rpi-image`, generates the rest from
+`make sessions-rpi`, part of `make image-rpi`, generates the rest from
 `SESSION` and `SESSIONS`, and removes what an earlier build chose:
 
 - every session script goes to `/usr/local/lib/behead/sessions`. every
   session is run the same way, `NAME.sh {width} {height} {fps}`, which is
   why kodi and the wayland demo have scripts of their own that only call
-  `kiosk.sh`. `make demo SESSION=` relies on the same form
+  `kiosk.sh`. `make demo-vm SESSION=` relies on the same form
 - `sessions/depends/NAME` becomes `depends/session-NAME` for each session
   chosen, plus the kiosk's list when one of them runs in the kiosk. the
   scripts are small enough to always ship; the packages are not
@@ -612,7 +659,7 @@ none of these has been settled against a real headunit.
   it carries, which the tool replays. the google signed phone certificate AACS
   publishes, with its key, chains to it but expired on 2026-02-18.
   the ordered certificate list exists for these headunits; see
-  R8. `make rpi-image` puts the extracted pairs in the image behind the
+  R8. `make image-rpi` puts the extracted pairs in the image behind the
   self-signed one, so the certificate proven on the sprinter is still
   offered first. the scripted headunit can verify like them: the session tests check
   that an expired certificate is reported, and, given the root

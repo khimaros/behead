@@ -262,6 +262,8 @@ class FakeHeadunit:
             self.audio_session = None
         elif channel == MEDIA_AUDIO_CHANNEL and message_id == MEDIA_WITH_TIMESTAMP:
             self.audio.append((struct.unpack(">Q", body[:8])[0], body[8:]))
+            if self.viewer:
+                self.viewer.play(MEDIA_RATE, MEDIA_CHANNELS, body[8:])
             self.ack(channel, self.audio_session)
         elif channel == MICROPHONE_CHANNEL and message_id == MICROPHONE_REQUEST:
             self.microphone_open = bool(dict(parse(body)).get(1))

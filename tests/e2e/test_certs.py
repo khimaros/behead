@@ -1,4 +1,4 @@
-"""end-to-end: the certificates `make rpi-certs` collects for the pi image"""
+"""end-to-end: the certificates `make certs-rpi` collects for the pi image"""
 
 import pathlib
 import tempfile
@@ -17,7 +17,7 @@ class RpiCerts(unittest.TestCase):
         self.certs, self.cache = pathlib.Path(tmp.name, "certs"), pathlib.Path(tmp.name, "cache")
 
     def collect(self):
-        """the names `make rpi-certs` leaves in the image's certificate directory, in order"""
+        """the names `make certs-rpi` leaves in the image's certificate directory, in order"""
         make_rpi_certs(self.certs, self.cache)
         return sorted(path.name for path in self.certs.iterdir())
 

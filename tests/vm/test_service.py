@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "rpi"))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "device"))
 import test_device
 import test_uinput as uinput_tier
 import test_usb as usb_tier
@@ -92,7 +92,7 @@ class ServiceTest(test_device.DeviceTest):
         self.assertTrue(socket.is_socket(), f"no socket at {socket}")
 
     def test_session_env_replaces_the_video_command(self):
-        """`make rpi-image SESSION=...` chooses a session by writing session.env"""
+        """`make image-rpi SESSION=...` chooses a session by writing session.env"""
         marker = self.dir / "session-ran"
         command = re.search(r'^VIDEO_CMD="(.*)"$', DEFAULT_ENV.read_text(), re.MULTILINE).group(1)
         SESSION_ENV.write_text(f'VIDEO_CMD="touch {marker}; {command}"\n')

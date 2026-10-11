@@ -324,6 +324,23 @@ installed into the image when it is built. that needs qemu-system-aarch64
 11 or newer, dtc and internet access on the build host, and makes the first
 build slow; later builds reuse the downloaded packages.
 
+### flashing a running pi
+
+NOT yet tried on a pi. the card can stay in the pi, in its case:
+
+    make ota-rpi                         # DESTRUCTIVE: replaces the pi's card, and restarts it
+
+sends the image over ssh to a pi that is up, at `ADDRESS` in
+`rpi/customize.env`: its ethernet port (10.55.1.1) or its hotspot
+(10.55.2.1), since android auto has the usb port. `SESSION` chooses the
+image as it does for `make flash-rpi`. like a flash it replaces the whole
+card, settings and media with it.
+
+the pi goes on running from memory while its card is written. a transfer
+that fails leaves the card half written and the pi still up, to be sent the
+image again; a pi that loses power in that state needs its card in a reader.
+so does one whose new image does not start.
+
 to try a change on a running pi without reflashing:
 
     make deploy-rpi      # cross-builds, copies both binaries, restarts the service

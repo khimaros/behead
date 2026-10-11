@@ -74,7 +74,7 @@ ESP32_CARGO = cd $(ESP32_DIR) && ESP_IDF_SDKCONFIG_DEFAULTS="$(ESP32_SDKCONFIG)"
 ESP32_ELF := target/riscv32imafc-esp-espidf/release/behead-esp32
 
 .PHONY: build build-rpi build-esp32 test test-e2e test-e2e-rpi vm test-vm demo-vm certs-rpi sessions-rpi image-rpi \
-	flash-rpi deploy-rpi certs-esp32 flash-esp32 monitor-esp32 test-device headunit precommit clean
+	flash-rpi ota-rpi deploy-rpi certs-esp32 flash-esp32 monitor-esp32 test-device headunit precommit clean
 
 build:
 	cargo build
@@ -229,6 +229,11 @@ image-rpi: build-rpi $(RPI_DIR)/customize.env certs-rpi sessions-rpi
 # MOUNT_DEVICE names in rpi/customize.env
 flash-rpi:
 	cd $(RPI_DIR) && $(RASPI_PROVISION) flash $(RPI_IMAGE)
+
+# DESTRUCTIVE: write the same image to the card inside a running pi, over
+# ssh to ADDRESS in rpi/customize.env, and restart it. the card stays in
+ota-rpi:
+	cd $(RPI_DIR) && $(RASPI_PROVISION) ota $(RPI_IMAGE)
 
 # copy freshly built binaries to a running pi and restart the service. they
 # land in the ram layer, so this leaves the card itself untouched: a reboot

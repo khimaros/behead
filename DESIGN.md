@@ -627,6 +627,18 @@ the pi has one usb device controller, and the base image gives it to
 loads it again after stopping, so the two uses take turns and raspi-provision
 needs no change.
 
+the laptop takes its turn over the cable itself, since that cable is often
+the only way to a pi in its case. beside the accessory requests the gadget
+answers one of behead's own (`RELEASE` in `aap::accessory`, vendor request
+0xbe with a key as its value, so that a host trying requests at random does
+not take the phone off the bus): it acknowledges, then sends itself the
+signal a stop sends. that is the one path that removes the gadget, and it
+ends the server cleanly, so the unit does not restart it and its
+`ExecStopPost` loads `g_ether` as after any stop. `tools/release-usb.py`
+sends the request, `make release-rpi` runs it, and `make ota-rpi` runs it
+before `raspi-provision ota`, which waits for the pi to answer ssh. the
+firmware on the esp32 refuses the request: its port has no other use.
+
 ## protocol sources and quirks
 
 google publishes only the usb layer: android open accessory 1.0 and 2.0 on

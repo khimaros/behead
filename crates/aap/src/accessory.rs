@@ -28,6 +28,11 @@ pub const UNPLUG_GRACE_MS: u32 = 2000;
 const GET_PROTOCOL: u8 = 51;
 const SEND_STRING: u8 = 52;
 const START: u8 = 53;
+/// behead's own, beside the accessory requests: let go of the usb port. no
+/// car sends it, and it counts only with RELEASE_KEY as its value, so that a
+/// host trying requests at random does not take the phone off the bus
+const RELEASE: u8 = 0xbe;
+const RELEASE_KEY: u16 = 0x6568;
 const USB_DIR_IN: u8 = 0x80;
 const DT_INTERFACE: u8 = 4;
 const DT_ENDPOINT: u8 = 5;
@@ -59,6 +64,8 @@ pub enum Reply {
     Receive(usize),
     /// as Receive, then come back as an accessory
     Start(usize),
+    /// acknowledge, then give the usb port up to whatever had it before
+    Release,
     /// not an accessory request: refuse it
     Stall,
 }
@@ -69,11 +76,13 @@ pub fn reply(setup: &[u8]) -> Reply {
         return Reply::Stall;
     }
     let (to_host, request) = (setup[0] & USB_DIR_IN != 0, setup[1]);
+    let value = u16::from_le_bytes([setup[2], setup[3]]);
     let length = u16::from_le_bytes([setup[6], setup[7]]) as usize;
     match (request, to_host) {
         (GET_PROTOCOL, true) => Reply::Send(PROTOCOL_VERSION.to_le_bytes()),
         (SEND_STRING, false) => Reply::Receive(length),
         (START, false) => Reply::Start(length),
+        (RELEASE, false) if value == RELEASE_KEY && length == 0 => Reply::Release,
         _ => Reply::Stall,
     }
 }
@@ -90,6 +99,13 @@ mod tests {
         assert_eq!(reply(&[VENDOR_IN, 51, 0, 0, 0, 0, 2, 0]), Reply::Send([2, 0]));
         assert_eq!(reply(&[VENDOR_OUT, 52, 0, 0, 1, 0, 8, 0]), Reply::Receive(8));
         assert_eq!(reply(&[VENDOR_OUT, 53, 0, 0, 0, 0, 0, 0]), Reply::Start(0));
+    }
+
+    #[test]
+    fn lets_go_of_the_port_for_the_request_that_asks_it() {
+        assert_eq!(reply(&[VENDOR_OUT, 0xbe, 0x68, 0x65, 0, 0, 0, 0]), Reply::Release);
+        assert_eq!(reply(&[VENDOR_OUT, 0xbe, 0, 0, 0, 0, 0, 0]), Reply::Stall, "without its key");
+        assert_eq!(reply(&[VENDOR_IN, 0xbe, 0x68, 0x65, 0, 0, 0, 0]), Reply::Stall, "it goes to the device");
     }
 
     #[test]

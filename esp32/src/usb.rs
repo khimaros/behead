@@ -282,7 +282,8 @@ extern "C" fn tud_vendor_control_xfer_cb(rhport: u8, stage: u8, request: *const 
             START_REQUESTED.store(true, Ordering::SeqCst);
             (d.received.as_mut_ptr().cast(), length)
         }
-        Reply::Stall => return false,
+        // the board has nothing else to give its port to
+        Reply::Release | Reply::Stall => return false,
     };
     // SAFETY: the buffers live in the descriptors, and are as long as what is transferred
     unsafe {

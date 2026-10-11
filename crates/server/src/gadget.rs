@@ -209,9 +209,8 @@ fn set_live(live: &Live, value: bool) {
     live.1.notify_all();
 }
 
-/// answer one control request. returns true when the headunit asked us to
-/// start accessory mode.
-fn on_setup(ep0: &mut File, setup: &[u8]) -> Result<bool, String> {
+/// answer one control request, and say what it asked for
+fn on_setup(ep0: &mut File, setup: &[u8]) -> Result<Reply, String> {
     let reply = accessory::reply(&setup[..SETUP_LENGTH]);
     match reply {
         Reply::Send(version) => context(ep0.write_all(&version), "answering protocol request")?,
@@ -219,11 +218,22 @@ fn on_setup(ep0: &mut File, setup: &[u8]) -> Result<bool, String> {
             let mut data = vec![0; length];
             context(ep0.read(&mut data), "reading accessory request")?;
         }
+        Reply::Release => drop(context(ep0.read(&mut []), "acknowledging the release request")?),
         // functionfs stalls a request when asked for io in the wrong direction
         Reply::Stall if setup[0] & USB_DIR_IN != 0 => drop(ep0.read(&mut [])),
         Reply::Stall => drop(ep0.write(&[])),
     }
-    Ok(matches!(reply, Reply::Start(_)))
+    Ok(reply)
+}
+
+/// give the usb port up: end as a stop of the service does, through the
+/// signal that replaces this process with `behead teardown`. a clean end,
+/// so the unit that started the server leaves it down and puts back what
+/// had the port before
+fn release() {
+    eprintln!("the usb host asked for the port: letting go of it");
+    // SAFETY: a signal to this process, which the server blocks and waits for
+    unsafe { libc::kill(libc::getpid(), libc::SIGTERM) };
 }
 
 /// true once `file` has data to read, false if `timeout_ms` passes first
@@ -251,10 +261,14 @@ fn control_loop(mut ep0: File, udc: &str, live: &Live) -> Result<(), String> {
         for event in events[..n].chunks_exact(FFS_EVENT_LEN) {
             let was_live = *live.0.lock().unwrap();
             match event[8] {
-                EVENT_SETUP if on_setup(&mut ep0, event)? && !accessory => {
-                    accessory = true;
-                    enumerate(udc, ACCESSORY_ID)?;
-                }
+                EVENT_SETUP => match on_setup(&mut ep0, event)? {
+                    Reply::Start(_) if !accessory => {
+                        accessory = true;
+                        enumerate(udc, ACCESSORY_ID)?;
+                    }
+                    Reply::Release => release(),
+                    _ => {}
+                },
                 EVENT_ENABLE if accessory => {
                     unplugged = false;
                     set_live(live, true);

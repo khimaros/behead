@@ -60,6 +60,11 @@ DEVICE_TESTS = $(if $(filter esp32,$(DEVICE)),test_firmware,test_device)
 check_device = $(if $(filter $(DEVICE_NAMES),$(DEVICE)),,$(error unknown device $(DEVICE): one of $(DEVICE_NAMES)))
 PYUSB := pyusb==1.3.1
 RASPI_PROVISION ?= cargo run --quiet --release --manifest-path $(abspath ../raspi-provision/Cargo.toml) --
+# where a pi answers on its usb cable once behead has let go of the port:
+# raspi-provision's shared-rndis connection. ota-rpi flashes through it
+# unless OTA_ADDRESS names another way to the pi
+RPI_USB_ADDRESS := 10.55.0.1
+OTA_ADDRESS ?= $(RPI_USB_ADDRESS)
 
 ESP32_DIR := esp32
 ESP32_PHONE := $(ESP32_DIR)/certs/phone
@@ -74,7 +79,7 @@ ESP32_CARGO = cd $(ESP32_DIR) && ESP_IDF_SDKCONFIG_DEFAULTS="$(ESP32_SDKCONFIG)"
 ESP32_ELF := target/riscv32imafc-esp-espidf/release/behead-esp32
 
 .PHONY: build build-rpi build-esp32 test test-e2e test-e2e-rpi vm test-vm demo-vm certs-rpi sessions-rpi image-rpi \
-	flash-rpi ota-rpi deploy-rpi certs-esp32 flash-esp32 monitor-esp32 test-device headunit precommit clean
+	flash-rpi release-rpi ota-rpi deploy-rpi certs-esp32 flash-esp32 monitor-esp32 test-device headunit precommit clean
 
 build:
 	cargo build
@@ -230,10 +235,17 @@ image-rpi: build-rpi $(RPI_DIR)/customize.env certs-rpi sessions-rpi
 flash-rpi:
 	cd $(RPI_DIR) && $(RASPI_PROVISION) flash $(RPI_IMAGE)
 
+# ask the behead on the usb cable to give the port back to usb networking,
+# so the pi answers ssh at RPI_USB_ADDRESS. it stays so until the service is
+# started again, or the pi is
+release-rpi:
+	uv run --no-project --with $(PYUSB) python tools/release-usb.py
+
 # DESTRUCTIVE: write the same image to the card inside a running pi, over
-# ssh to ADDRESS in rpi/customize.env, and restart it. the card stays in
-ota-rpi:
-	cd $(RPI_DIR) && $(RASPI_PROVISION) ota $(RPI_IMAGE)
+# ssh, and restart it. the card stays in. over the usb cable, with the port
+# asked for first, unless OTA_ADDRESS names the pi on another network
+ota-rpi: $(if $(filter $(RPI_USB_ADDRESS),$(OTA_ADDRESS)),release-rpi)
+	cd $(RPI_DIR) && ADDRESS=$(OTA_ADDRESS) $(RASPI_PROVISION) ota $(RPI_IMAGE)
 
 # copy freshly built binaries to a running pi and restart the service. they
 # land in the ram layer, so this leaves the card itself untouched: a reboot

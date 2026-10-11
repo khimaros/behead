@@ -330,11 +330,23 @@ NOT yet tried on a pi. the card can stay in the pi, in its case:
 
     make ota-rpi                         # DESTRUCTIVE: replaces the pi's card, and restarts it
 
-sends the image over ssh to a pi that is up, at `ADDRESS` in
-`rpi/customize.env`: its ethernet port (10.55.1.1) or its hotspot
-(10.55.2.1), since android auto has the usb port. `SESSION` chooses the
+sends the image over ssh to a pi that is up, through the usb cable it is
+on. android auto has that port, so behead is first asked over the cable to
+give it up: the service ends, usb networking comes back as it is with the
+service stopped, and the pi answers at 10.55.0.1. `SESSION` chooses the
 image as it does for `make flash-rpi`. like a flash it replaces the whole
-card, settings and media with it.
+card, settings and media with it. `OTA_ADDRESS=10.55.1.1` (ethernet) or
+`10.55.2.1` (the hotspot) sends it that way instead and leaves the usb port
+alone.
+
+    make release-rpi                     # only the first half: the usb port back to networking
+
+leaves the pi reachable over the cable for `ssh` or `make deploy-rpi
+RPI_ADDRESS=10.55.0.1`, until `systemctl start behead` there or a restart
+gives android auto the port again. both need the udev rule in
+`tests/device/70-behead.rules`. anything the pi is plugged into could send
+the same request, and gains what a pi with its service stopped offers: a
+network link and an ssh login that still wants a key or the password.
 
 the pi goes on running from memory while its card is written. a transfer
 that fails leaves the card half written and the pi still up, to be sent the

@@ -30,6 +30,7 @@ INSTALLED = {
 }
 CERTS = pathlib.Path("/etc/behead/certs")
 USB_ETHERNET = "g_ether"
+RELEASE_TOOL = ROOT / "tools/release-usb.py"
 SETTLE = 5
 
 
@@ -102,6 +103,22 @@ class ServiceTest(test_device.DeviceTest):
         time.sleep(SETTLE)
         self.stream()
         self.assertTrue(marker.exists(), "the service ran the default video command")
+
+    def test_a_request_over_the_cable_hands_the_controller_back(self):
+        """how the laptop reaches a pi over the one cable it has, to flash it:
+        the server lets go when asked, and stays down, a clean stop"""
+        usb_tier.wait_for(lambda: usb_tier.find(usb_tier.INITIAL_ID), "the gadget to enumerate")
+        try:
+            self.assertIn("released", run(sys.executable, RELEASE_TOOL))
+            time.sleep(SETTLE)
+            state = subprocess.run(["systemctl", "is-active", UNIT], capture_output=True, text=True).stdout.strip()
+            self.assertEqual(state, "inactive", "the server went on, or the unit counted its end a failure")
+            self.assertFalse(usb_tier.GADGET_DIR.exists(), "gadget left in configfs")
+            self.assertTrue(module_loaded(USB_ETHERNET), "usb ethernet was not restored")
+        finally:
+            systemctl("start", UNIT)
+            time.sleep(SETTLE)
+            self.assertEqual(systemctl("is-active", UNIT).strip(), "active")
 
     def test_stop_hands_the_controller_back(self):
         systemctl("stop", UNIT)

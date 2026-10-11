@@ -550,6 +550,23 @@ mod tests {
     }
 
     #[test]
+    fn folders_inside_folders_open_and_close_in_turn() {
+        let files = ["Artist/Album/Disc 2/one.wav", "Artist/Album/two.wav", "Artist/three.wav", "four.wav"];
+        let (mut app, player, _) = launcher_with("nested", files.map(String::from).into_iter());
+        tap(&mut app, MUSIC_TILE);
+        for folder in ["Artist", "Artist/Album", "Artist/Album/Disc 2"] {
+            tap(&mut app, FIRST_LINE);
+            assert_eq!(app.folder, folder);
+        }
+        tap(&mut app, FIRST_LINE);
+        assert_eq!(player.now().map(|now| now.track), Some(0));
+        for folder in ["Artist/Album", "Artist", ""] {
+            tap(&mut app, BACK);
+            assert_eq!((app.screen, app.folder.as_str(), app.cursor), (Screen::Music, folder, 0));
+        }
+    }
+
+    #[test]
     fn the_knob_and_keys_do_the_same() {
         let (mut app, player, _) = launcher("knob");
         feed(&mut app, &["relative 65536 1", "button 23 down", "button 23 up"]);

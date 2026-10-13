@@ -47,9 +47,10 @@ const USAGE: &str =
   --listen ADDR    tcp address to accept the headunit on (default 127.0.0.1:5277)
   --uinput         also deliver touch and buttons as kernel input devices,
                    'behead touchscreen' and 'behead keys'. needs /dev/uinput
-  --knob KEYS      what a turn of the car's rotary knob types with --uinput:
+  --knob KEYS      what a turn of the car's rotary knob is with --uinput:
                    'focus' for tab and shift+tab (default), 'arrows' for
-                   down and up
+                   down and up, 'scroll' for a mouse's wheel, which zooms
+                   a map
   --nmea-socket PATH  offer the car's location as nmea sentences on a unix
                    socket, for a location service such as geoclue
   --max-height LINES  when the headunit asks for a taller picture than this,

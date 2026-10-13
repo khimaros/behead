@@ -62,7 +62,11 @@ touch. it runs on a raspberry pi 4, tested from a laptop over usb, and a
   key press per detent. `focus`, the default, is tab one way and shift+tab
   the other, which moves between the things on screen in most applications.
   `arrows` is down and up, for applications such as kodi where tab does
-  something else. the pi image's kodi session uses `arrows`; `KNOB` in
+  something else. `scroll` makes each detent a notch of a mouse's wheel
+  instead, clockwise toward the hand, of a pointer that stays in the middle
+  of the screen: it zooms a map that zooms for nothing else, as comaps
+  does, about its middle, and scrolls whatever else is there. the phosh
+  session draws no pointer. the pi image's kodi session uses `arrows`; `KNOB` in
   `/etc/behead/behead.env` sets it for the others
 - `--nmea-socket`: offer the car's location on a unix socket at this path,
   as the nmea sentences of a gps receiver (GGA and RMC), for a location
@@ -212,12 +216,48 @@ droidian, with its overview and apps on the headunit:
 
     --video-cmd 'sessions/phosh.sh {width} {height} {fps}'
 
+the pi image brings the gnome settings and a terminal with it
+(`sessions/depends/phosh` lists them, and is where to add more), and gnome
+maps, which shows where the car is. it has the map of the places an image
+is built with for when there is no network, which is none unless asked for:
+
+    make image-rpi SESSION=phosh MAP_AREAS='Maine=-71.1,43.0,-66.9,47.5;Boston=-71.2,42.2,-70.9,42.5'
+
+each a name and its west, south, east and north edges in degrees. the map
+is there offline; searching it and finding a route still ask the network.
+gnome maps is a flatpak (`sessions/depends/phosh.flatpak`), because it
+keeps maps from its version 51 and debian stable has 48. it adds about
+1.7 GB to the image, and two cities some 80 MB. gnome maps treats the
+places as its own afterwards: it brings them up to date when it has a
+network, and more can be added in its preferences.
+
+for searching the map and finding a route with no network there is comaps
+beside it, which does both on regions it keeps on the device: the south of
+the san francisco bay and tennessee, unless the image is built for others,
+
+    make image-rpi SESSION=phosh COMAPS_REGIONS='US_Maine;France_Ile-de-France_Paris'
+
+by comaps' own names for them, which `tools/fetch-comaps.py --flatpak
+~/.cache/behead/flatpak/aarch64 --list` prints. comaps is a program for a
+desk, with a mouse's small buttons. the session has a button's list open
+for a finger held on it, where comaps wants the small arrow beside it
+touched, and the grey strip under the buttons opens the ones a small
+screen has no room for, search among them. its map is dark or light as the style
+was when the session started, and does not follow the car after that. it adds 1.8 GB to the image and the three regions 550 MB.
+
+gapless, a third flatpak, plays the music under `BEHEAD_MEDIA`, the files
+kodi and the launcher play, to the car. it adds 1.2 GB, nearly all of it
+the gnome runtime it is built on, which is not the one gnome maps uses.
+
 it needs phosh, phoc, gnome-settings-daemon-common and gsettings, and like
 the kiosk it renders on the cpu and runs as root. the screen does not lock
-or blank, and applications are asked for their dark style while the car
-reports night. a car without a touchscreen drives it with its knob: a turn
+or blank, and applications are asked for their dark style. `BEHEAD_COLOR_SCHEME`
+chooses another: `light`, or `car`, which is dark until the car says it is
+day and follows the car from then on. on the pi it is a line of
+`/etc/behead/session.env`. a car without a touchscreen drives it with its knob: a turn
 moves between the overview's icons, a click opens one, and the home button
-goes to the overview and back.
+goes to the overview and back. where something wants text, phosh brings up
+its keyboard on the screen (squeekboard, when it is installed).
 
 the session runs a pulseaudio of its own, so its applications have sound.
 it plays into the same alsa loopback as kodi, and the same command records
@@ -319,6 +359,13 @@ hostname and the session it shows, `-demo` without one, so images of several
 sessions can sit side by side. give `make flash-rpi` the same `SESSION` to
 write that one.
 
+a card that was flashed before keeps what is on raspi-provision's persist
+partition: `/home`, with the media kodi plays, `/var/lib/behead`, with each
+session's own settings and android's data, the saved networks and the pi's
+ssh keys. `WIPE=1`, with `make flash-rpi` or `make ota-rpi`, starts the card
+over. it is also started over, and says so, when the new image puts that
+partition somewhere else, as an image of a much larger session does.
+
 the packages in `rpi/depends`, ffmpeg for the default video command, are
 installed into the image when it is built. that needs qemu-system-aarch64
 11 or newer, dtc and internet access on the build host, and makes the first
@@ -326,16 +373,16 @@ build slow; later builds reuse the downloaded packages.
 
 ### flashing a running pi
 
-NOT yet tried on a pi. the card can stay in the pi, in its case:
+the card can stay in the pi, in its case:
 
-    make ota-rpi                         # DESTRUCTIVE: replaces the pi's card, and restarts it
+    make ota-rpi                         # DESTRUCTIVE: replaces the pi's system, and restarts it
 
 sends the image over ssh to a pi that is up, through the usb cable it is
 on. android auto has that port, so behead is first asked over the cable to
 give it up: the service ends, usb networking comes back as it is with the
 service stopped, and the pi answers at 10.55.0.1. `SESSION` chooses the
-image as it does for `make flash-rpi`. like a flash it replaces the whole
-card, settings and media with it. `OTA_ADDRESS=10.55.1.1` (ethernet) or
+image as it does for `make flash-rpi`, and like a flash it keeps settings
+and media unless `WIPE=1`. `OTA_ADDRESS=10.55.1.1` (ethernet) or
 `10.55.2.1` (the hotspot) sends it that way instead and leaves the usb port
 alone.
 
@@ -512,7 +559,9 @@ pictures fall behind, which is the test for a stall that takes minutes.
 the cable, a pi or an esp32-p4: its video on a page,
 which opens by itself, and the mouse on the picture as a finger. the mouse
 wheel turns a rotary knob, the arrow keys tilt it and enter clicks it;
-escape is back and h is home. ctrl-c stops it. the page plays the device's
+escape is back and the home key is home. the rest of the keyboard types:
+letters, digits, punctuation and shift go to the device as a keyboard's
+keys, for a session that takes them (`--uinput`). ctrl-c stops it. the page plays the device's
 media audio too, from the first click or key on it, which a browser waits
 for before it makes a sound. the same goes for the page behind `HEADED=1`.
 

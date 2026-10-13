@@ -140,10 +140,16 @@ class DesktopTest(unittest.TestCase):
             return None
         stream = cls.dir / "received.h264"
         stream.write_bytes(cls.headunit.config[0] + b"".join(data for _, data in cls.headunit.frames))
-        raw = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", stream, "-fps_mode", "passthrough",
-                              "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], check=True, capture_output=True).stdout
-        assert len(raw) % FRAME_BYTES == 0, "frames are not at the negotiated size"
-        return raw[-FRAME_BYTES:] or None
+        # a picture at a time: the whole of a minute's video, decoded, is
+        # more memory than the vm has
+        decoder = subprocess.Popen(["ffmpeg", "-loglevel", "error", "-i", stream, "-fps_mode", "passthrough",
+                                    "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], stdout=subprocess.PIPE)
+        last = None
+        while picture := decoder.stdout.read(FRAME_BYTES):
+            assert len(picture) == FRAME_BYTES, "frames are not at the negotiated size"
+            last = picture
+        assert decoder.wait() == 0, "the video the car received does not decode"
+        return last
 
     @classmethod
     def pixel(cls, x, y):

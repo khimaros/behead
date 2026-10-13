@@ -45,6 +45,13 @@ class RpiSessions(unittest.TestCase):
         # stands in for tools/preinstall-apks.py, and keeps what it was asked
         self.preinstalled = self.dir / "preinstalled"
         self.preinstall = self.stub("preinstall", f'#!/bin/sh\ntest -f "$1" && echo "$@" > {self.preinstalled}\n')
+        # stand in for tools/fetch-flatpak.sh and tools/fetch-maps.sh, which
+        # fetch gigabytes: each leaves what it was asked, a line an argument
+        self.flatpaks, self.maps = self.dir / "flatpak", self.dir / "maps"
+        asked = '#!/bin/sh\nmkdir -p "$%d"\nprintf "%%s\\n" "$@" > "$%d/asked"\n'
+        self.fetch_flatpak, self.fetch_maps = self.stub("fetch-flatpak", asked % (2, 2)), self.stub("fetch-maps", asked % (1, 1))
+        # and for tools/fetch-comaps.py, which is told its directory after --flatpak DIR --out
+        self.comaps, self.fetch_comaps = self.dir / "comaps", self.stub("fetch-comaps", asked % (4, 4))
 
     def stub(self, name, script):
         path = self.dir / name
@@ -59,7 +66,9 @@ class RpiSessions(unittest.TestCase):
             f"RPI_SESSION_CMDLINE={self.cmdline}", f"WAYDROID_CACHE={self.dir / 'cache'}",
             f"APK_CACHE={self.apk_cache}", f"FETCH_WAYDROID={self.fetch}", f"FETCH_FDROID={self.fetch_app}",
             f"PREINSTALL_APKS={self.preinstall}", f"RPI_GEOCLUE={self.geoclue}",
-            f"RPI_APT_PREFERENCES={self.preferences}",
+            f"RPI_APT_PREFERENCES={self.preferences}", f"RPI_FLATPAK={self.flatpaks}", f"RPI_MAPS={self.maps}",
+            f"FETCH_FLATPAK={self.fetch_flatpak}", f"FETCH_MAPS={self.fetch_maps}",
+            f"RPI_COMAPS={self.comaps}", f"FETCH_COMAPS={self.fetch_comaps}",
             *(f"{name}={value}" for name, value in chosen.items()))
 
     def package_lists(self):
@@ -157,6 +166,47 @@ class RpiSessions(unittest.TestCase):
         self.assertIn("geoclue-2.0", self.packages("phosh"))
         socket = re.search(r"^nmea-socket=(\S+)$", self.geoclue.read_text(), re.MULTILINE).group(1)
         self.assertIn(f" --nmea-socket {socket} ", UNIT.read_text())
+
+    def test_phosh_comes_with_applications_to_open(self):
+        """a shell with nothing in its launcher shows the car nothing: the
+        settings its own menus lead to, a terminal, and a map, which is a
+        flatpak, the image's debian having none that keeps maps for later"""
+        self.collect(SESSION="phosh")
+        for package in ("flatpak", "xdg-desktop-portal-gtk", "gnome-control-center", "gnome-console", "squeekboard"):
+            self.assertIn(package, self.packages("phosh"))
+        self.assertNotIn("gnome-maps", self.packages("phosh"), "the packaged map beside the flatpak one")
+        self.assertEqual((self.flatpaks / "asked").read_text().split(),
+                         ["aarch64", str(self.flatpaks), "org.gnome.Maps", "app.comaps.comaps",
+                          "com.github.neithern.g4music"])
+
+    def test_the_map_that_searches_and_routes_comes_with_its_regions(self):
+        """comaps does all of it with no network, on regions of its own
+        kind: those of the two cities unless COMAPS_REGIONS names others,
+        taken from the list of the comaps the image carries"""
+        self.collect(SESSION="phosh")
+        asked = (self.comaps / "asked").read_text().splitlines()
+        self.assertEqual(asked[:4], ["--flatpak", str(self.flatpaks), "--out", str(self.comaps)])
+        self.assertEqual(asked[4:], ["US_California_Santa_Clara_Palo Alto", "US_Tennessee_West", "US_Tennessee_East"])
+        self.collect(SESSION="phosh", COMAPS_REGIONS="US_Maine;France_Ile-de-France_Paris")
+        self.assertEqual((self.comaps / "asked").read_text().splitlines()[4:], ["US_Maine", "France_Ile-de-France_Paris"])
+        self.collect(SESSION="phosh", COMAPS_REGIONS="")
+        self.assertFalse(self.comaps.exists(), "regions fetched though none were asked for")
+
+    def test_the_map_comes_with_the_places_asked_for(self):
+        """for where there is no network: the ones MAP_AREAS names, and
+        none unless it does"""
+        self.collect(SESSION="phosh")
+        self.assertFalse(self.maps.exists(), "maps fetched though none were asked for")
+        self.collect(SESSION="phosh", MAP_AREAS="Mount Desert Island=-68.5,44.2,-68.1,44.5;Bar=1,2,3,4")
+        asked = (self.maps / "asked").read_text().splitlines()
+        self.assertEqual(asked[0], str(self.maps))
+        self.assertEqual(asked[1:], ["Mount Desert Island=-68.5,44.2,-68.1,44.5", "Bar=1,2,3,4"])
+
+    def test_other_sessions_bring_no_flatpaks_and_no_maps(self):
+        self.collect(SESSION="phosh")
+        self.collect(SESSION="kodi")
+        left = [path for path in (self.flatpaks, self.maps, self.comaps) if path.exists()]
+        self.assertEqual(left, [], "left from the image built before")
 
     def test_the_launcher_needs_no_packages_and_plays_its_own_sound(self):
         """it draws its own pictures and decodes its own music, so the image

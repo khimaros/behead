@@ -12,3 +12,15 @@ libgl1-mesa-dri
 # the session's sound server, and arecord, for audio.sh
 pulseaudio
 alsa-utils
+# the keyboard on the screen, which a car has no other
+squeekboard
+# something for the shell to open: the settings phosh's own menus lead to,
+# and a terminal
+gnome-control-center
+gnome-console
+# and a map of where geoclue says the car is, which is in phosh.flatpak:
+# gnome maps keeps parts of the map for when there is no network from its
+# version 51 on, and debian stable has 48. flatpak runs it, and the portal
+# is where it learns the dark style and asks for the location
+flatpak
+xdg-desktop-portal-gtk

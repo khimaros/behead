@@ -10,6 +10,7 @@ import http.server
 import json
 import os
 import queue
+import re
 import socket
 import subprocess
 import threading
@@ -22,17 +23,35 @@ JPEG_END = b"\xff\xd9"
 # an access unit delimiter. ffmpeg's parser only knows a picture is complete
 # when the next one starts, and a still screen sends no next one
 PICTURE_END = b"\x00\x00\x00\x01\x09\xf0"
+# a picture that needs none before it: one with a slice of an idr picture
+# (nal type 5) or the parameter sets x264 puts in front of one (7)
+KEYFRAME = re.compile(rb"\x00\x00\x01[\x05\x07\x25\x27\x45\x47\x65\x67]")
+# pictures kept for a decoder that is behind, a second of them
+VIDEO_BACKLOG = 30
 # the page waits this long after one picture before it asks for the next:
 # with the time a picture takes to come, under the 33 ms between a car's
 RELOAD_MS = 15
 # the keyboard as a car's buttons, by android key code: the arrows tilt a
 # rotary knob, enter clicks it, and the mouse wheel turns it
-KEYS = {"ArrowUp": 19, "ArrowDown": 20, "ArrowLeft": 21, "ArrowRight": 22, "Enter": 23,
-        "Escape": 4, "Backspace": 4, "h": 3}
+BUTTONS = {"ArrowUp": 19, "ArrowDown": 20, "ArrowLeft": 21, "ArrowRight": 22, "Enter": 23, "Escape": 4, "Home": 3}
+# and as a keyboard, which a headunit may have too. each key by its place,
+# as the browser's `code` names it, and shift as a key of its own: what is
+# typed is then the phone's to decide, as with a keyboard plugged into it.
+# control and alt stay the browser's, for its own shortcuts
+A, ZERO = 29, 7
+TYPING = {
+    **{f"Key{letter}": A + place for place, letter in enumerate("ABCDEFGHIJKLMNOPQRSTUVWXYZ")},
+    **{f"Digit{digit}": ZERO + digit for digit in range(10)},
+    "Comma": 55, "Period": 56, "ShiftLeft": 59, "ShiftRight": 60, "Tab": 61, "Space": 62, "Backspace": 67,
+    "Backquote": 68, "Minus": 69, "Equal": 70, "BracketLeft": 71, "BracketRight": 72, "Backslash": 73,
+    "Semicolon": 74, "Quote": 75, "Slash": 76, "Delete": 112,
+}
+KEYS = {**BUTTONS, **TYPING}
 ROTARY = 65536
 # what a headunit has to advertise for the page's controls to reach the phone
 KEYCODES = sorted({*KEYS.values(), ROTARY})
-HELP = "mouse: finger. wheel: knob. arrows: tilt. enter: click. escape: back. h: home. sound: after a click or a key"
+HELP = ("mouse: finger. wheel: knob. arrows: tilt. enter: click. escape: back. home: home. "
+        "the rest of the keyboard types. sound: after a click or a key")
 # what media audio is until a headunit says: its rate and channels
 AUDIO_FORMAT = (48000, 2)
 SAMPLE_BYTES = 2
@@ -70,10 +89,11 @@ picture.onpointermove = (event) => down && touch("move", event);
 picture.onpointerup = (event) => {{ down = false; touch("up", event); }};
 // a drag is a finger moving, and neither marks the picture nor picks it up
 picture.onmousedown = picture.ondragstart = (event) => event.preventDefault();
-// the keyboard is the car's buttons. a held key repeats, a held button does not
+// the keyboard is the car's buttons, and a keyboard. a held key repeats
+// here, a held button does not: the phone repeats what is held down itself
 const keys = {json.dumps(KEYS)};
 const button = (event, pressed) => {{
-  const code = keys[event.key];
+  const code = keys[event.code];
   if (code === undefined || event.repeat) return;
   event.preventDefault();
   fetch(`/button?code=${{code}}&pressed=${{pressed}}`);
@@ -150,7 +170,10 @@ class Viewer:
              "-flush_packets", "1", "-f", "image2pipe", "-"],
             # it complains of a broken pipe when the tests exit before it
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        os.set_blocking(self.decoder.stdin.fileno(), False)
+        # the pictures the decoder has yet to be given, and whether one was
+        # lost since the last that stands alone
+        self.pictures, self.waiting = queue.Queue(VIDEO_BACKLOG), False
+        threading.Thread(target=self.decode, daemon=True).start()
         self.latest = b""
         # (action, x, y) for each mouse event on the picture, for whoever
         # wants to pass them on as touches. the tests ignore them
@@ -171,14 +194,27 @@ class Viewer:
         time.sleep(LINGER_SECONDS)
 
     def feed(self, annexb):
-        """pass on h.264. what the decoder has no room for is dropped, so a
-        slow browser never holds up a test"""
+        """pass on a picture of h.264. a decoder that falls behind loses
+        whole pictures, so it never holds up a test, and then every one up to
+        the next that stands alone: a picture built on one it never saw is
+        drawn wrong"""
+        if self.waiting and not KEYFRAME.search(annexb):
+            return
         try:
-            self.decoder.stdin.write(annexb + PICTURE_END)
-            # now, not once python has gathered a block of them: the
-            # pictures of a still screen are a few hundred bytes each
-            self.decoder.stdin.flush()
-        except (BlockingIOError, BrokenPipeError):
+            self.pictures.put_nowait(annexb)
+            self.waiting = False
+        except queue.Full:
+            self.waiting = True
+
+    def decode(self):
+        """hand the decoder each picture whole, however long it takes one"""
+        try:
+            while True:
+                self.decoder.stdin.write(self.pictures.get() + PICTURE_END)
+                # now, not once python has gathered a block of them: the
+                # pictures of a still screen are a few hundred bytes each
+                self.decoder.stdin.flush()
+        except (BrokenPipeError, ValueError):
             pass
 
     def play(self, rate, channels, pcm):

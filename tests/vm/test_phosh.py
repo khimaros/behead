@@ -47,6 +47,16 @@ NMEA_SOCKET = "/run/behead/nmea.sock"
 WHERE_AM_I, EXACT = "/usr/libexec/geoclue-2.0/demos/where-am-i", "8"
 # what it prints for the fix the test sends, in degrees, metres and m/s
 LOCATION = {"Latitude": 52.52, "Longitude": 13.405, "Altitude": 34.5, "Speed": 12.501, "Heading": 90.5}
+# what gsettings prints for the style applications are asked for
+DARK_STYLE, LIGHT_STYLE = "'prefer-dark'", "'default'"
+# the name an on-screen keyboard takes on the session's bus for phosh to find
+OSK_NAME = "sm.puri.OSK0"
+# the overview's search field, which brings the keyboard up when tapped, and
+# the middle of the keyboard's space bar. how bright that is, of 255: the
+# bare screen is nearly black, a dark key a dim grey, a light key near white
+SEARCH_FIELD = (260, 72)
+SPACE_BAR = (300, 435, 500, 465)
+BARE_SCREEN, LIGHT_KEY = 30, 130
 
 
 def near(colour, expected):
@@ -66,8 +76,11 @@ def is_ring(pixel):
     return blue - red > RING_BLUE
 
 
-class PhoshTest(desktop.DesktopTest):
+class PhoshSession(desktop.DesktopTest):
+    """the phosh session behind a car, and how to look at it"""
     KEYCODES = (fakehu.HOME, fakehu.BACK, fakehu.DPAD_CENTER, fakehu.ROTARY)
+    # BEHEAD_COLOR_SCHEME for the session, or None for what it does unasked
+    SCHEME = None
 
     @classmethod
     def count(cls, box, wanted):
@@ -84,9 +97,15 @@ class PhoshTest(desktop.DesktopTest):
         (applications / "behead-demo.desktop").write_text(DESKTOP_ENTRY)
 
     @classmethod
+    def settings(cls):
+        """what the session is told through its environment"""
+        scheme = {"BEHEAD_COLOR_SCHEME": cls.SCHEME} if cls.SCHEME else {}
+        return {**scheme, "BEHEAD_HOME": cls.dir / "home", "BEHEAD_RUNTIME_DIR": cls.dir / "runtime"}
+
+    @classmethod
     def video_cmd(cls):
-        return (f"env BEHEAD_HOME={cls.dir / 'home'} BEHEAD_RUNTIME_DIR={cls.dir / 'runtime'} "
-                f"{desktop.SESSIONS / 'phosh.sh'} {{width}} {{height}} {{fps}}")
+        settings = " ".join(f"{name}={value}" for name, value in cls.settings().items())
+        return f"env {settings} {desktop.SESSIONS / 'phosh.sh'} {{width}} {{height}} {{fps}}"
 
     @classmethod
     def style(cls):
@@ -99,6 +118,15 @@ class PhoshTest(desktop.DesktopTest):
     def server_options(cls):
         return ["--nmea-socket", NMEA_SOCKET, "--audio-cmd", desktop.AUDIO_CMD]
 
+    @classmethod
+    def started(cls):
+        return cls.count(APP_ICON_BOX, is_light) >= ICON_PIXELS
+
+    def tell(self, night):
+        self.headunit.sense(fakehu.SENSOR_NIGHT, night)
+
+
+class PhoshTest(PhoshSession):
     def test_an_applications_sound_reaches_the_car(self):
         """an application plays a tone to the session's sound server, as a
         pulseaudio client, and the car gets it as media audio"""
@@ -128,14 +156,43 @@ class PhoshTest(desktop.DesktopTest):
         answer = dict(re.findall(r"(\w+): +(-?[\d.]+)", output.read_text()))
         self.assertEqual({name: round(float(answer[name]), 3) for name in LOCATION}, LOCATION)
 
-    def test_follows_the_cars_night_mode(self):
-        for night, style in ((1, "'prefer-dark'"), (0, "'default'")):
-            self.headunit.sense(fakehu.SENSOR_NIGHT, night)
-            self.wait_for(lambda: self.style() == style, f"asked for {style}, still {self.style()}")
+    def test_has_a_keyboard_on_screen_to_type_with(self):
+        """a car has no keyboard. phosh shows the one that answers to this
+        name on the session's bus, when it is told to show one at all"""
+        session = {**os.environ, "DBUS_SESSION_BUS_ADDRESS": f"unix:path={self.dir / 'runtime/bus'}"}
 
-    @classmethod
-    def started(cls):
-        return cls.count(APP_ICON_BOX, is_light) >= ICON_PIXELS
+        def keyboard_running():
+            asked = subprocess.run(["gdbus", "call", "--session", "--dest", "org.freedesktop.DBus", "--object-path",
+                                    "/org/freedesktop/DBus", "--method", "org.freedesktop.DBus.NameHasOwner",
+                                    OSK_NAME], capture_output=True, text=True, env=session)
+            return "true" in asked.stdout
+        self.wait_for(keyboard_running, f"started an on-screen keyboard ({OSK_NAME})")
+        settings = {**os.environ, "GSETTINGS_BACKEND": "keyfile", "XDG_CONFIG_HOME": str(self.dir / "runtime/config")}
+        enabled = subprocess.run(["gsettings", "get", "org.gnome.desktop.a11y.applications", "screen-keyboard-enabled"],
+                                 capture_output=True, text=True, env=settings).stdout.strip()
+        self.assertEqual(enabled, "true", "the shell is not told to show it")
+
+    def test_the_keyboard_on_screen_is_dark_like_the_rest(self):
+        """it takes its look from the gtk theme's name, not from the style
+        applications are asked for, so the session has to say both"""
+        session = {**os.environ, "DBUS_SESSION_BUS_ADDRESS": f"unix:path={self.dir / 'runtime/bus'}"}
+        hide = ["gdbus", "call", "--session", "--dest", OSK_NAME, "--object-path", "/sm/puri/OSK0", "--method",
+                f"{OSK_NAME}.SetVisible", "false"]
+        self.addCleanup(subprocess.run, hide, capture_output=True, env=session)
+        self.tap(*SEARCH_FIELD)
+
+        def space_bar():
+            frame, (left, top, right, bottom) = self.last_frame(), SPACE_BAR
+            levels = [frame[(y * desktop.WIDTH + x) * 3 + 1] for y in range(top, bottom) for x in range(left, right)]
+            return sum(levels) / len(levels)
+        self.wait_for(lambda: space_bar() > BARE_SCREEN, "showed its keyboard for a text field")
+        self.assertLess(space_bar(), LIGHT_KEY, "the keyboard is in its light style on a dark screen")
+
+    def test_is_dark_whatever_the_car_says(self):
+        self.assertEqual(self.style(), DARK_STYLE)
+        self.tell(night=0)
+        self.pump_for(SETTLE)
+        self.assertEqual(self.style(), DARK_STYLE, "a car in daylight turned the lights on, unasked")
 
     def showing_the_app(self):
         return near(self.pixel(desktop.WIDTH // 2, desktop.HEIGHT // 2), DEMO_BACKGROUND)
@@ -167,6 +224,26 @@ class PhoshTest(desktop.DesktopTest):
         self.headunit.touch(fakehu.TOUCH_DOWN, [(0, *TOUCH)])
         self.addCleanup(self.headunit.touch, fakehu.TOUCH_UP, [(0, *TOUCH)])
         self.wait_for(lambda: near(self.pixel(*TOUCH), DEMO_MARKER), "drew a marker under the finger")
+
+
+class PhoshFollowingTheCarTest(PhoshSession):
+    SCHEME = "car"
+
+    def test_is_dark_until_the_car_says_day_and_follows_it_from_then(self):
+        self.assertEqual(self.style(), DARK_STYLE, "a car that has said nothing yet gets the light style")
+        for night, style in ((0, LIGHT_STYLE), (1, DARK_STYLE)):
+            self.tell(night)
+            self.wait_for(lambda: self.style() == style, f"asked for {style}, still {self.style()}")
+
+
+class LightPhoshTest(PhoshSession):
+    SCHEME = "light"
+
+    def test_is_light_whatever_the_car_says(self):
+        self.assertEqual(self.style(), LIGHT_STYLE)
+        self.tell(night=1)
+        self.pump_for(SETTLE)
+        self.assertEqual(self.style(), LIGHT_STYLE, "a car at night turned the lights off, unasked")
 
 
 if __name__ == "__main__":

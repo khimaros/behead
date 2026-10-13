@@ -41,6 +41,27 @@ RPI_SESSION_PREFERENCES = $(RPI_APT_PREFERENCES)/session-
 # kernel parameters the chosen sessions need, handed to raspi-provision
 RPI_SESSION_CMDLINE := $(RPI_DIR)/session.cmdline
 RPI_GEOCLUE := $(RPI_DIR)/overlay/etc/geoclue/conf.d/90-behead.conf
+# applications the chosen sessions take from flathub, debian stable having
+# none recent enough: a flatpak installation of the pi's kind, fetched here
+# and carried in the image for the sessions to run from
+session_flatpaks = $(shell cat /dev/null $(wildcard $(session_depends:%=%.flatpak)))
+RPI_FLATPAK := $(RPI_DIR)/overlay/usr/share/behead/flatpak
+RPI_FLATPAK_ARCH := aarch64
+FETCH_FLATPAK ?= tools/fetch-flatpak.sh
+# the parts of the map gnome maps shows with no network, when a session
+# brings it: NAME=WEST,SOUTH,EAST,NORTH in degrees, with ; between. none
+# unless asked for
+MAPS_APPLICATION := org.gnome.Maps
+MAP_AREAS ?=
+RPI_MAPS := $(RPI_DIR)/overlay/usr/share/behead/maps
+FETCH_MAPS ?= tools/fetch-maps.sh
+# and the regions comaps shows, searches and routes on with no network, by
+# the names it gives them (`tools/fetch-comaps.py --list`), with ; between.
+# tennessee is two, and nashville near where they meet
+COMAPS_APPLICATION := app.comaps.comaps
+COMAPS_REGIONS ?= US_California_Santa_Clara_Palo Alto;US_Tennessee_West;US_Tennessee_East
+RPI_COMAPS := $(RPI_DIR)/overlay/usr/share/behead/comaps
+FETCH_COMAPS ?= tools/fetch-comaps.py
 RPI_WAYDROID := $(RPI_DIR)/overlay/usr/share/waydroid-extra/images
 RPI_WAYDROID_ARCH := arm64
 WAYDROID_CACHE ?= $(HOME)/.cache/behead/waydroid
@@ -201,13 +222,18 @@ endif
 sessions-rpi:
 	$(check_sessions)
 	rm -rf $(RPI_SESSIONS) $(RPI_SESSION_ENV) $(RPI_SESSION_DEPENDS)* $(RPI_SESSION_SOURCES)* \
-		$(RPI_SESSION_PREFERENCES)* $(RPI_WAYDROID)
+		$(RPI_SESSION_PREFERENCES)* $(RPI_WAYDROID) $(RPI_FLATPAK) $(RPI_MAPS) $(RPI_COMAPS)
 	install -D -t $(RPI_SESSIONS) $(SESSIONS_DIR)/*.sh $(SESSIONS_DIR)/*.py
 	install -D -m 644 $(SESSIONS_DIR)/geoclue.conf $(RPI_GEOCLUE)
 	$(foreach list,$(session_depends),install -D -m 644 $(list) $(RPI_SESSION_DEPENDS)$(notdir $(list));)
 	$(foreach list,$(wildcard $(session_depends:%=%.sources)),install -D -m 644 $(list) $(RPI_SESSION_SOURCES)$(notdir $(list));)
 	$(foreach pins,$(wildcard $(session_depends:%=%.preferences)),install -D -m 644 $(pins) $(RPI_SESSION_PREFERENCES)$(basename $(notdir $(pins)));)
 	cat /dev/null $(wildcard $(session_depends:%=%.cmdline)) > $(RPI_SESSION_CMDLINE)
+	$(if $(session_flatpaks),$(FETCH_FLATPAK) $(RPI_FLATPAK_ARCH) $(RPI_FLATPAK) $(session_flatpaks))
+	$(if $(filter $(MAPS_APPLICATION),$(session_flatpaks)),areas='$(MAP_AREAS)'; IFS=';'; set -f; set -- $$areas; unset IFS; \
+		[ $$# -eq 0 ] || $(FETCH_MAPS) $(RPI_MAPS) "$$@")
+	$(if $(filter $(COMAPS_APPLICATION),$(session_flatpaks)),regions='$(COMAPS_REGIONS)'; IFS=';'; set -f; set -- $$regions; unset IFS; \
+		[ $$# -eq 0 ] || $(FETCH_COMAPS) --flatpak $(RPI_FLATPAK) --out $(RPI_COMAPS) "$$@")
 ifneq ($(SESSION),)
 	echo 'VIDEO_CMD="$(RPI_SESSIONS_PATH)/$(SESSION).sh {width} {height} {fps}"' > $(RPI_SESSION_ENV)
 	cat /dev/null $(wildcard $(SESSIONS_DIR)/depends/$(SESSION).env) >> $(RPI_SESSION_ENV)
@@ -231,9 +257,12 @@ image-rpi: build-rpi $(RPI_DIR)/customize.env certs-rpi sessions-rpi
 	cd $(RPI_DIR) && CMDLINE_EXTRA="$$(cat $(abspath $(RPI_SESSION_CMDLINE)))" $(RASPI_PROVISION) image $(RPI_IMAGE)
 
 # DESTRUCTIVE: write the image of SESSION, or the demo's, to the sdcard that
-# MOUNT_DEVICE names in rpi/customize.env
+# MOUNT_DEVICE names in rpi/customize.env. a card flashed before keeps its
+# home, media and settings (raspi-provision's persist partition) unless WIPE
+# is set, here and in ota-rpi
+WIPE ?=
 flash-rpi:
-	cd $(RPI_DIR) && $(RASPI_PROVISION) flash $(RPI_IMAGE)
+	cd $(RPI_DIR) && $(RASPI_PROVISION) flash $(if $(WIPE),--wipe) $(RPI_IMAGE)
 
 # ask the behead on the usb cable to give the port back to usb networking,
 # so the pi answers ssh at RPI_USB_ADDRESS. it stays so until the service is
@@ -245,7 +274,7 @@ release-rpi:
 # ssh, and restart it. the card stays in. over the usb cable, with the port
 # asked for first, unless OTA_ADDRESS names the pi on another network
 ota-rpi: $(if $(filter $(RPI_USB_ADDRESS),$(OTA_ADDRESS)),release-rpi)
-	cd $(RPI_DIR) && ADDRESS=$(OTA_ADDRESS) $(RASPI_PROVISION) ota $(RPI_IMAGE)
+	cd $(RPI_DIR) && ADDRESS=$(OTA_ADDRESS) $(RASPI_PROVISION) ota $(if $(WIPE),--wipe) $(RPI_IMAGE)
 
 # copy freshly built binaries to a running pi and restart the service. they
 # land in the ram layer, so this leaves the card itself untouched: a reboot

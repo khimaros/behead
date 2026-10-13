@@ -18,7 +18,11 @@ need `openssl`, `ffmpeg` with libx264, and `ffprobe` on the path.
 - `make build-rpi`, `make test-e2e-rpi`: cross-compile for the rpi4 and run
   the tcp tests against that binary under qemu user emulation. needs clang.
 - `make image-rpi`: build the sdcard image. needs `../raspi-provision` and
-  its prerequisites (libguestfs-tools, xz-utils). `make flash-rpi` writes
+  its prerequisites (libguestfs-tools, xz-utils). `SESSION=phosh` also
+  needs flatpak here and the network: gnome maps and its runtime are
+  fetched from flathub for the pi (`tools/fetch-flatpak.sh`, 1.7 GB, kept
+  in `~/.cache/behead/flatpak`), and the parts of the map in `MAP_AREAS`
+  with gnome maps' own downloader (`tools/fetch-maps.sh`). `make flash-rpi` writes
   it to the sdcard, and `make ota-rpi` to the card inside a running pi,
   over its usb cable. `make release-rpi` asks the pi for that port alone.
 - `make test-device`: device tests against an rpi4 on a usb cable, or with

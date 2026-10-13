@@ -8,6 +8,7 @@
 /overlay/usr/local/lib/behead/sessions/
 /overlay/etc/behead/session.env
 /overlay/usr/share/waydroid-extra/
+/overlay/usr/share/behead/
 /overlay/etc/geoclue/
 /overlay/etc/apt/sources.list.d/session-*
 /overlay/etc/apt/preferences.d/session-*

@@ -12,12 +12,22 @@ use std::os::unix::fs::OpenOptionsExt;
 const UINPUT_PATH: &str = "/dev/uinput";
 const TOUCHSCREEN_NAME: &str = "behead touchscreen";
 const KEYS_NAME: &str = "behead keys";
+const WHEEL_NAME: &str = "behead knob";
+/// where the wheel's pointer is: half of the positions an axis of it has,
+/// which a screen of any size takes for its middle
+const POINTER_MIDDLE: i32 = 1 << 14;
 const BUS_VIRTUAL: u16 = 0x06;
 const EV_SYN: u16 = 0x00;
 const EV_KEY: u16 = 0x01;
+const EV_REL: u16 = 0x02;
 const EV_ABS: u16 = 0x03;
 const SYN_REPORT: u16 = 0x00;
 const BTN_TOUCH: u16 = 0x14a;
+const BTN_LEFT: u16 = 0x110;
+const REL_WHEEL: u16 = 0x08;
+const REL_WHEEL_HI_RES: u16 = 0x0b;
+/// what one notch of a wheel is in the kernel's finer unit
+const WHEEL_NOTCH: i32 = 120;
 const ABS_X: u16 = 0x00;
 const ABS_Y: u16 = 0x01;
 const ABS_MT_SLOT: u16 = 0x2f;
@@ -36,15 +46,22 @@ const UI_DEV_SETUP: u32 = iow(3, size_of::<libc::uinput_setup>());
 const UI_ABS_SETUP: u32 = iow(4, size_of::<libc::uinput_abs_setup>());
 const UI_SET_EVBIT: u32 = iow(100, size_of::<libc::c_int>());
 const UI_SET_KEYBIT: u32 = iow(101, size_of::<libc::c_int>());
+const UI_SET_RELBIT: u32 = iow(102, size_of::<libc::c_int>());
 const UI_SET_ABSBIT: u32 = iow(103, size_of::<libc::c_int>());
 const UI_SET_PROPBIT: u32 = iow(110, size_of::<libc::c_int>());
 
-/// android key codes the headunit may send, and the linux keys they become
-const KEYMAP: [(u32, u16); 19] = [
+/// android key codes the headunit may send, and the linux keys they become,
+/// in android's order. a car has the buttons among them; a headunit with a
+/// keyboard, as the laptop's is, has the rest, and a device gets only the
+/// keys its headunit says it has
+#[rustfmt::skip]
+const KEYMAP: &[(u32, u16)] = &[
     (3, 172),   // home: KEY_HOMEPAGE
     (4, 158),   // back: KEY_BACK
     (5, 169),   // call: KEY_PHONE
     (6, 0x1be), // end call: KEY_HANGUP_PHONE
+    // 0 to 9: KEY_0 comes after KEY_9
+    (7, 11), (8, 2), (9, 3), (10, 4), (11, 5), (12, 6), (13, 7), (14, 8), (15, 9), (16, 10),
     (19, 103),  // dpad up: KEY_UP
     (20, 108),  // dpad down: KEY_DOWN
     (21, 105),  // dpad left: KEY_LEFT
@@ -52,11 +69,37 @@ const KEYMAP: [(u32, u16); 19] = [
     (23, 28),   // dpad center: KEY_ENTER
     (24, 115),  // volume up: KEY_VOLUMEUP
     (25, 114),  // volume down: KEY_VOLUMEDOWN
+    // a to z, which linux numbers by their place on the keyboard
+    (29, 30), (30, 48), (31, 46), (32, 32), (33, 18), (34, 33), (35, 34), (36, 35), (37, 23),
+    (38, 36), (39, 37), (40, 38), (41, 50), (42, 49), (43, 24), (44, 25), (45, 16), (46, 19),
+    (47, 31), (48, 20), (49, 22), (50, 47), (51, 17), (52, 45), (53, 21), (54, 44),
+    (55, 51),   // comma: KEY_COMMA
+    (56, 52),   // period: KEY_DOT
+    (57, 56),   // alt left: KEY_LEFTALT
+    (58, 100),  // alt right: KEY_RIGHTALT
+    (59, 42),   // shift left: KEY_LEFTSHIFT
+    (60, 54),   // shift right: KEY_RIGHTSHIFT
+    (61, 15),   // tab: KEY_TAB
+    (62, 57),   // space: KEY_SPACE
     (66, 28),   // enter: KEY_ENTER
+    (67, 14),   // del, which is backspace: KEY_BACKSPACE
+    (68, 41),   // grave: KEY_GRAVE
+    (69, 12),   // minus: KEY_MINUS
+    (70, 13),   // equals: KEY_EQUAL
+    (71, 26),   // left bracket: KEY_LEFTBRACE
+    (72, 27),   // right bracket: KEY_RIGHTBRACE
+    (73, 43),   // backslash: KEY_BACKSLASH
+    (74, 39),   // semicolon: KEY_SEMICOLON
+    (75, 40),   // apostrophe: KEY_APOSTROPHE
+    (76, 53),   // slash: KEY_SLASH
     (84, 217),  // search: KEY_SEARCH
     (85, 164),  // media play/pause: KEY_PLAYPAUSE
     (87, 163),  // media next: KEY_NEXTSONG
     (88, 165),  // media previous: KEY_PREVIOUSSONG
+    (111, 1),   // escape: KEY_ESC
+    (112, 111), // forward del: KEY_DELETE
+    (113, 29),  // ctrl left: KEY_LEFTCTRL
+    (114, 97),  // ctrl right: KEY_RIGHTCTRL
     (126, 200), // media play: KEY_PLAYCD
     (127, 201), // media pause: KEY_PAUSECD
     (164, 113), // volume mute: KEY_MUTE
@@ -71,15 +114,19 @@ const KEY_DOWN: u16 = 108;
 /// detents typed out of one turn, so a wild delta cannot hold the session up
 const MAX_DETENTS: u32 = 32;
 
-/// what a turn of the car's rotary knob types, one detent at a time. linux
-/// has no input for a knob that applications agree on, so it becomes keys
-#[derive(Clone, Copy, Default)]
+/// what a turn of the car's rotary knob becomes, one detent at a time. linux
+/// has no input for a knob that applications agree on, so it becomes keys,
+/// or the wheel of a mouse
+#[derive(Clone, Copy, Default, PartialEq)]
 pub enum Knob {
     /// tab and shift+tab: the next and previous thing that takes focus
     #[default]
     Focus,
     /// down and up, for applications that give tab another meaning
     Arrows,
+    /// a notch of a mouse's wheel, which is how a map made for a desk zooms
+    /// and has no other way that a car has: not a key, not two fingers
+    Scroll,
 }
 
 impl std::str::FromStr for Knob {
@@ -89,7 +136,8 @@ impl std::str::FromStr for Knob {
         match name {
             "focus" => Ok(Self::Focus),
             "arrows" => Ok(Self::Arrows),
-            _ => Err(format!("--knob takes focus or arrows, not {name}")),
+            "scroll" => Ok(Self::Scroll),
+            _ => Err(format!("--knob takes focus, arrows or scroll, not {name}")),
         }
     }
 }
@@ -102,6 +150,7 @@ impl Knob {
             (Self::Focus, false) => &[KEY_LEFTSHIFT, KEY_TAB],
             (Self::Arrows, true) => &[KEY_DOWN],
             (Self::Arrows, false) => &[KEY_UP],
+            (Self::Scroll, _) => &[],
         }
     }
 
@@ -109,8 +158,29 @@ impl Knob {
         [true, false].into_iter().flat_map(move |clockwise| self.chord(clockwise).iter().copied())
     }
 
-    /// one detent as key reports: the chord pressed, then released in reverse
+    /// one detent as reports: the chord pressed, then released in reverse,
+    /// or a notch of the wheel. clockwise is the wheel rolled toward the
+    /// hand, as the headunit page has it, where a mouse's wheel is the knob:
+    /// rolled down there it is a clockwise turn, and has to arrive as rolled
+    /// down. the pointer is put in the middle of the screen first, since a
+    /// map zooms about wherever the pointer is. from a step beside it,
+    /// every time: the kernel passes on no position that is the one before,
+    /// and a wheel turns for nothing once a finger on the screen has taken
+    /// the pointer's place, until the pointer moves again
     fn detent(self, clockwise: bool) -> Vec<Event> {
+        if self == Self::Scroll {
+            let way = if clockwise { -1 } else { 1 };
+            return vec![
+                (EV_ABS, ABS_X, POINTER_MIDDLE + 1),
+                (EV_ABS, ABS_Y, POINTER_MIDDLE),
+                (EV_SYN, SYN_REPORT, 0),
+                (EV_ABS, ABS_X, POINTER_MIDDLE),
+                (EV_SYN, SYN_REPORT, 0),
+                (EV_REL, REL_WHEEL, way),
+                (EV_REL, REL_WHEEL_HI_RES, way * WHEEL_NOTCH),
+                (EV_SYN, SYN_REPORT, 0),
+            ];
+        }
         let chord = self.chord(clockwise);
         let presses = chord.iter().map(|&key| (key, 1)).chain(chord.iter().rev().map(|&key| (key, 0)));
         presses.flat_map(|(key, value)| [(EV_KEY, key, value), (EV_SYN, SYN_REPORT, 0)]).collect()
@@ -212,6 +282,29 @@ fn transition(old: &Contacts, new: &Contacts, next_tracking_id: &mut i32) -> Vec
     events
 }
 
+/// give a device an axis that reports positions from 0 to `maximum`
+fn absolute_axis(file: &File, code: u16, maximum: i32) -> Result<(), String> {
+    ioctl_int(file, UI_SET_ABSBIT, code)?;
+    let absinfo = libc::input_absinfo { value: 0, minimum: 0, maximum, fuzz: 0, flat: 0, resolution: 0 };
+    ioctl_ptr(file, UI_ABS_SETUP, &libc::uinput_abs_setup { code, absinfo })
+}
+
+/// the knob as a mouse's wheel. a wheel is taken for one only on something
+/// that is otherwise a mouse, so this one has a button, never pressed, and a
+/// place on the screen, which a wheel turns out to need: what it zooms is
+/// zoomed about the pointer. its place is given as a position, not as moves,
+/// so that it can be said exactly
+fn create_wheel() -> Result<Device, String> {
+    Device::create(WHEEL_NAME, |file| {
+        ioctl_int(file, UI_SET_EVBIT, EV_KEY)?;
+        ioctl_int(file, UI_SET_KEYBIT, BTN_LEFT)?;
+        ioctl_int(file, UI_SET_EVBIT, EV_ABS)?;
+        [ABS_X, ABS_Y].into_iter().try_for_each(|axis| absolute_axis(file, axis, POINTER_MIDDLE * 2 - 1))?;
+        ioctl_int(file, UI_SET_EVBIT, EV_REL)?;
+        [REL_WHEEL, REL_WHEEL_HI_RES].into_iter().try_for_each(|axis| ioctl_int(file, UI_SET_RELBIT, axis))
+    })
+}
+
 struct Touchscreen {
     device: Device,
     contacts: Contacts,
@@ -233,18 +326,7 @@ impl Touchscreen {
             ioctl_int(file, UI_SET_EVBIT, EV_KEY)?;
             ioctl_int(file, UI_SET_KEYBIT, BTN_TOUCH)?;
             ioctl_int(file, UI_SET_EVBIT, EV_ABS)?;
-            axes.iter().try_for_each(|&(code, maximum)| {
-                ioctl_int(file, UI_SET_ABSBIT, code)?;
-                let absinfo = libc::input_absinfo {
-                    value: 0,
-                    minimum: 0,
-                    maximum: maximum as i32,
-                    fuzz: 0,
-                    flat: 0,
-                    resolution: 0,
-                };
-                ioctl_ptr(file, UI_ABS_SETUP, &libc::uinput_abs_setup { code, absinfo })
-            })
+            axes.iter().try_for_each(|&(code, maximum)| absolute_axis(file, code, maximum as i32))
         })?;
         Ok(Self { device, contacts: Contacts::new(), next_tracking_id: 0 })
     }
@@ -259,10 +341,11 @@ impl Touchscreen {
 
 /// the headunit's input as kernel devices: a touchscreen spanning its touch
 /// area, and a keyboard with the keys it advertised that have a linux match,
-/// plus the keys its knob types if it has one
+/// plus the keys its knob types if it has one, or a wheel for it to be
 pub struct Devices {
     touchscreen: Option<Touchscreen>,
     keys: Option<Device>,
+    wheel: Option<Device>,
     knob: Knob,
 }
 
@@ -272,6 +355,7 @@ impl Devices {
         let touchscreen = area.filter(|&(w, h)| w > 0 && h > 0).map(|(w, h)| Touchscreen::create(w, h)).transpose()?;
         let codes = &channel.supported_keycodes;
         let turned = codes.contains(&ROTARY).then(|| knob.keys()).into_iter().flatten();
+        let wheel = (knob == Knob::Scroll && codes.contains(&ROTARY)).then(create_wheel).transpose()?;
         let keys: Vec<u16> = codes.iter().filter_map(|&code| linux_key(code)).chain(turned).collect();
         let keys = (!keys.is_empty())
             .then(|| {
@@ -281,23 +365,24 @@ impl Devices {
                 })
             })
             .transpose()?;
-        Ok(Self { touchscreen, keys, knob })
+        Ok(Self { touchscreen, keys, wheel, knob })
     }
 
     pub fn deliver(&mut self, event: &proto::InputEvent) -> Result<(), String> {
         if let (Some(screen), Some(touch)) = (self.touchscreen.as_mut(), &event.touch_event) {
             screen.touch(touch)?;
         }
-        let Some(keys) = self.keys.as_mut() else { return Ok(()) };
         for button in event.button_event.iter().flat_map(|b| &b.button_events) {
-            if let Some(key) = button.scan_code.and_then(linux_key) {
+            if let (Some(keys), Some(key)) = (self.keys.as_mut(), button.scan_code.and_then(linux_key)) {
                 keys.emit(&[(EV_KEY, key, button.is_pressed.unwrap_or(false) as i32), (EV_SYN, SYN_REPORT, 0)])?;
             }
         }
+        // the knob's turn goes to the wheel when there is one, or is typed
+        let Some(turned) = self.wheel.as_mut().or(self.keys.as_mut()) else { return Ok(()) };
         let turns = event.relative_event.iter().flat_map(|r| &r.relative_events);
         for delta in turns.filter(|turn| turn.scan_code == Some(ROTARY)).filter_map(|turn| turn.delta) {
             for _ in 0..delta.unsigned_abs().min(MAX_DETENTS) {
-                keys.emit(&self.knob.detent(delta > 0))?;
+                turned.emit(&self.knob.detent(delta > 0))?;
             }
         }
         Ok(())
@@ -313,5 +398,40 @@ mod tests {
         let report = |key, value| [(EV_KEY, key, value), (EV_SYN, SYN_REPORT, 0)];
         let expected = [report(KEY_LEFTSHIFT, 1), report(KEY_TAB, 1), report(KEY_TAB, 0), report(KEY_LEFTSHIFT, 0)];
         assert_eq!(Knob::Focus.detent(false), expected.concat());
+    }
+
+    #[test]
+    fn a_detent_can_be_a_notch_of_a_mouse_wheel() {
+        let knob: Knob = "scroll".parse().unwrap();
+        let notch = |way| {
+            vec![
+                (EV_ABS, ABS_X, POINTER_MIDDLE + 1),
+                (EV_ABS, ABS_Y, POINTER_MIDDLE),
+                (EV_SYN, SYN_REPORT, 0),
+                (EV_ABS, ABS_X, POINTER_MIDDLE),
+                (EV_SYN, SYN_REPORT, 0),
+                (EV_REL, REL_WHEEL, way),
+                (EV_REL, REL_WHEEL_HI_RES, way * WHEEL_NOTCH),
+                (EV_SYN, SYN_REPORT, 0),
+            ]
+        };
+        // the pointer has to move for every notch: the kernel passes on no
+        // position that is the one before, and a compositor gives the wheel
+        // to nothing once a finger has been on the screen since the pointer moved
+        assert_eq!(knob.detent(true), notch(-1), "clockwise is the wheel rolled toward the hand");
+        assert_eq!(knob.detent(false), notch(1));
+        assert_eq!(knob.keys().count(), 0, "a wheel types nothing");
+    }
+
+    #[test]
+    fn a_keyboards_keys_become_the_same_keys_here() {
+        // android's code, then linux's: a, z, 0, 9, space, backspace, shift, slash
+        for (android, linux) in [(29, 30), (54, 44), (7, 11), (16, 10), (62, 57), (67, 14), (59, 42), (76, 53)] {
+            assert_eq!(linux_key(android), Some(linux), "android key {android}");
+        }
+        let mut codes: Vec<u32> = KEYMAP.iter().map(|(android, _)| *android).collect();
+        codes.dedup();
+        assert_eq!(codes.len(), KEYMAP.len(), "an android key listed twice");
+        assert!(codes.is_sorted(), "kept in android's order, to be found in");
     }
 }

@@ -9,7 +9,13 @@ apt-get install -y --no-install-recommends \
     linux-image-amd64 kmod python3 python3-usb ffmpeg openssl podman \
     sway wf-recorder kodi kodi-visualization-spectrum libgl1-mesa-dri alsa-utils \
     phosh phoc gnome-settings-daemon-common libglib2.0-bin waydroid lxc \
-    geoclue-2.0 geoclue-2-demo pulseaudio
+    geoclue-2.0 geoclue-2-demo pulseaudio flatpak xdg-desktop-portal-gtk squeekboard
+
+# gnome maps for test_maps.py, comaps for test_comaps.py and gapless for
+# test_gapless.py, as the pi image carries them: a flatpak installation of
+# its own, with their runtimes, about 5 GB
+/incant/tools/fetch-flatpak.sh "$(flatpak --default-arch)" /usr/share/behead/flatpak org.gnome.Maps app.comaps.comaps \
+    com.github.neithern.g4music
 
 # the car's location for linux applications, asked for by test_phosh.py
 install -D -m 644 /incant/sessions/geoclue.conf /etc/geoclue/conf.d/90-behead.conf

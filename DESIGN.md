@@ -306,7 +306,16 @@ car as local hardware, without a per-compositor injection path.
   while keys go to whatever has focus. no pair of keys suits every
   application, so `--knob` picks: tab and shift+tab, which most toolkits
   read as next and previous, or down and up for kodi, where tab switches
-  to the player.
+  to the player. the wheel is there all the same, as `--knob scroll`, for
+  the one thing nothing else does: comaps, a map made for a desk, zooms for
+  a wheel and not for a key, a double tap or two fingers. the wheel is a
+  device of its own, `behead knob`, with the button and the two axes a wheel
+  needs beside it to be taken for a mouse. the axes are absolute, and every
+  notch first puts the pointer in the middle of the screen, so that a map
+  zooms about its middle and not about wherever a pointer was left. it
+  gets there from a step beside it: the kernel drops a position that is
+  the one before, and phoc 0.46 gives a wheel to nothing after a finger
+  was on the screen, until the pointer moves again.
 
 ## sensors
 
@@ -329,7 +338,9 @@ it attaches.
 
 the sessions act on what they can. `lib.sh`'s `on_line` calls a function
 with each line from stdin. phosh.sh sets the dark style preference for
-night, waydroid.sh android's night mode.
+night when `BEHEAD_COLOR_SCHEME=car` asks it to, and is dark throughout
+otherwise, the product owner's choice for a car; waydroid.sh sets android's
+night mode.
 
 location takes a way of its own, since a location service is system wide
 and outlives sessions. `--nmea-socket` has the server listen on a unix
@@ -571,6 +582,45 @@ path to `raspi-provision flash`, which decompresses it onto the card.
   the place `waydroid init` looks before it downloads any. the build's copy
   of the system image gets the f-droid and osmand~ apks from
   `tools/preinstall-apks.py`; the cached download stays as fetched
+- a session may name flatpak applications in `sessions/depends/NAME.flatpak`,
+  for what debian stable has too old: phosh names gnome maps, whose version
+  51 is the first to keep parts of the map for later, where stable has 48
+  and lacks the libraries 51 wants. moving the image to debian testing was
+  weighed and left: raspberry pi os follows stable, and testing changes
+  under a build. `tools/fetch-flatpak.sh` installs them for aarch64 into a
+  cache on the build host, which flatpak does without running anything of
+  theirs, and the whole installation goes into the image as
+  `/usr/share/behead/flatpak`. the image is built with no network and a
+  device has none for a gigabyte, so nothing is installed on the device:
+  phosh.sh names the directory in `FLATPAK_USER_DIR` and adds its exports
+  to `XDG_DATA_DIRS`, and the shell lists and starts what is in it
+- the map's places, `MAP_AREAS`, are fetched on the build host by gnome
+  maps' own downloader, run with no window inside its flatpak for the host
+  (`tools/fetch-map-areas.js`, in javascript because it runs gnome maps'
+  modules; `tools/fetch-maps.sh` around it). what it leaves is gnome maps'
+  own list and store, so there is no format of ours to keep up with theirs.
+  the two files go into the image as `/usr/share/behead/maps`, and phosh.sh
+  copies them to where the flatpak keeps its data, in the session's home,
+  once for each list an image comes with: a home on a kept persist
+  partition would otherwise hide a newer image's. gnome maps asks the
+  desktop portal before it uses the location, and shows no window until it
+  is answered, so phosh.sh grants it beforehand in the portal's store
+- gnome maps searches and routes through services on the network, at
+  addresses of which one is written into it. comaps, a second flatpak in
+  phosh's list, does both on the device, from regions of its own format.
+  `tools/fetch-comaps.py` reads the list of regions out of the comaps the
+  image carries, which names each with a size and a sha-1 and the version
+  of the data, and downloads the ones in `COMAPS_REGIONS` against those.
+  they go into the image as `/usr/share/behead/comaps/VERSION`, and phosh.sh
+  copies them into comaps' data in the session's home: a sandbox sees none
+  of the image's own directories, so a link would point nowhere, and comaps
+  removes a region it cannot read. phosh.sh also writes the two settings
+  that answer what comaps asks at a first start, and the name of its dark
+  or light map style, which comaps reads when it starts and takes from
+  nowhere else. what a finger needs of its buttons is a qt style sheet,
+  which comaps has no setting for and its own argument parser drops, unless
+  it comes after a `--`: so the session puts a launcher entry of its own
+  in front of flatpak's, with that at the end of its command
 - `sessions/geoclue.conf` goes to `/etc/geoclue/conf.d`, and the unit passes
   `--nmea-socket` with the path it names, under a `RuntimeDirectory`.
   geoclue itself comes with phosh's packages

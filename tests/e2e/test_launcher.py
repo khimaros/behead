@@ -266,8 +266,9 @@ class LauncherMapTest(LauncherCase):
         self.shows(ROAD_FAR, is_road, "the road ends short of where it goes")
         self.shows(OFF_ROAD, is_land, "something where there is only land")
         self.shows(AT_SEA, is_sea, "land west of the shore the map of the world has there")
-        # one detent back: everything is half as far from the car, the shore too
-        self.headunit.turn(fakehu.ROTARY, -1)
+        # one detent clockwise, a wheel rolled down: everything is half as
+        # far from the car, the shore too
+        self.headunit.turn(fakehu.ROTARY, 1)
         self.shows(ROAD_FAR, is_sea, "the map is no smaller for a turn of the knob")
         self.shows(ROAD_NEAR, is_road, "the road is gone with the map made smaller")
 

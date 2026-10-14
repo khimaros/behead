@@ -13,9 +13,11 @@ use behead_demo::{plain, Surface, ADVANCE, GLYPH_HEIGHT};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 const EXTENSION: &str = "bmap";
+/// squares kept decoded, enough for a few screens of the finest level
+const KEPT_SQUARES: usize = 48;
 const MAGIC: &[u8] = b"bmap";
 const VERSION: u8 = 1;
 const HEAD: usize = 8;
@@ -32,9 +34,13 @@ const RIVER: u8 = 6;
 const NAME: u8 = 7;
 /// land, in a map of the world, where everything else is sea
 const LAND_KIND: u8 = 8;
+/// one more than the largest kind
+const KINDS: usize = 9;
 /// what is drawn over what: land and water under everything, the widest
 /// roads last of the lines, and names over them all
 const ORDER: [u8; 8] = [LAND_KIND, WATER, RIVER, MINOR, MIDDLE, MAIN, MOTORWAY, NAME];
+/// what a map being moved goes without
+const DETAIL: [u8; 3] = [MINOR, MIDDLE, NAME];
 pub const LAND: [u8; 3] = [26, 30, 38];
 const WATER_COLOUR: [u8; 3] = [30, 52, 78];
 const SEA: [u8; 3] = WATER_COLOUR;
@@ -107,6 +113,10 @@ pub struct View {
     pub size: (u32, u32),
     /// pixels in one of the launcher's units, for the widths and the letters
     pub scale: u32,
+    /// whether a finger is moving the map: then it is drawn without its
+    /// small streets and their names, which are most of the time a picture
+    /// takes, so it keeps up with the finger. they are back once it stops
+    pub moving: bool,
 }
 
 impl View {
@@ -131,9 +141,46 @@ pub fn world(latitude: f64, longitude: f64) -> (u32, u32) {
     (((longitude + 180.0) / 360.0 * whole) as u32, (y * whole) as u32)
 }
 
+/// the shapes of one kind in a square, end to end in one list as the file
+/// has their points, across the square, and where each ends in it: a
+/// picture reads them in order, which the esp32-p4's small cache wants
+#[derive(Default)]
+struct Shapes {
+    points: Vec<(u16, u16)>,
+    ends: Vec<u32>,
+}
+
+/// one square read and decoded: where it is, its shapes by kind, and its names
+#[derive(Default)]
+struct Square {
+    shift: u32,
+    corner: (u64, u64),
+    shapes: [Shapes; KINDS],
+    names: Vec<((u16, u16), String)>,
+}
+
+impl Square {
+    /// the picture's pixel for a point across the square. its last
+    /// coordinate is its far edge, where the next square starts, so what is
+    /// cut at the edge meets its other part there
+    fn pixel(&self, view: &View, (x, y): (u16, u16)) -> (i64, i64) {
+        let place = |local: u16, corner: u64| {
+            let across = local as u64 + (local as u64 >> (LOCAL_BITS - 1));
+            (corner + (across << self.shift >> LOCAL_BITS)).min(u32::MAX.into()) as u32
+        };
+        view.pixel((place(x, self.corner.0), place(y, self.corner.1)))
+    }
+}
+
+/// a square kept decoded, by its level and its column and row
+type Kept = ((usize, u32, u32), Arc<Square>);
+
 pub struct Map {
     source: Source,
     levels: Vec<Level>,
+    /// the squares decoded last, the newest at the end. a picture of a map
+    /// being moved has nearly all the squares of the one before
+    kept: Mutex<Vec<Kept>>,
 }
 
 impl Map {
@@ -159,7 +206,7 @@ impl Map {
             level
         });
         let levels: Vec<Level> = levels.collect();
-        (!levels.is_empty()).then_some(Self { source, levels })
+        (!levels.is_empty()).then_some(Self { source, levels, kept: Mutex::new(vec![]) })
     }
 
     fn finest(&self) -> &Level {
@@ -187,15 +234,34 @@ impl Map {
     }
 
     /// the level for a view: the finest whose squares are wide enough on it
-    fn level(&self, zoom: u8) -> &Level {
-        let wide =
-            |level: &&Level| level.shift >= zoom as u32 && (1u32 << (level.shift - zoom as u32)) >= SQUARE_PIXELS;
-        self.levels.iter().rev().find(wide).unwrap_or(&self.levels[0])
+    fn level(&self, zoom: u8) -> usize {
+        let wide = |level: &Level| level.shift >= zoom as u32 && (1u32 << (level.shift - zoom as u32)) >= SQUARE_PIXELS;
+        self.levels.iter().rposition(wide).unwrap_or(0)
     }
 
-    /// the squares of a level a view shows, each with the place of its
-    /// corner and its features
-    fn squares(&self, level: &Level, view: &View) -> Vec<((u64, u64), Vec<u8>)> {
+    /// one square, decoded once and kept for the pictures after
+    fn square(&self, index: usize, column: u32, row: u32) -> Option<Arc<Square>> {
+        let mut kept = self.kept.lock().ok()?;
+        if let Some(at) = kept.iter().position(|(key, _)| *key == (index, column, row)) {
+            let found = kept.remove(at);
+            kept.push(found.clone());
+            return Some(found.1);
+        }
+        let level = &self.levels[index];
+        let entry = level.table + ((row - level.row) * level.columns + column - level.column) * ENTRY as u32;
+        let entry = self.source.read(entry, ENTRY)?;
+        let features = self.source.read(number(&entry, 0, 4), number(&entry, 4, 4) as usize)?;
+        let square = Arc::new(decode(level.shift, column, row, &features));
+        kept.push(((index, column, row), square.clone()));
+        if kept.len() > KEPT_SQUARES {
+            kept.remove(0);
+        }
+        Some(square)
+    }
+
+    /// the squares of a level a view shows
+    fn squares(&self, index: usize, view: &View) -> Vec<Arc<Square>> {
+        let level = &self.levels[index];
         let (left, top) = view.place(0, 0);
         let (right, bottom) = view.place(view.size.0.into(), view.size.1.into());
         let span = |from: i64, to: i64, first: u32, count: u32| {
@@ -208,57 +274,73 @@ impl Map {
         else {
             return vec![];
         };
-        let mut squares = vec![];
-        for row in rows {
-            for column in columns.clone() {
-                let entry = level.table + ((row - level.row) * level.columns + column - level.column) * ENTRY as u32;
-                let Some(entry) = self.source.read(entry, ENTRY) else { continue };
-                let features = self.source.read(number(&entry, 0, 4), number(&entry, 4, 4) as usize);
-                squares.push((
-                    ((column as u64) << level.shift, (row as u64) << level.shift),
-                    features.unwrap_or_default(),
-                ));
-            }
-        }
-        squares
+        let squares = rows.flat_map(|row| columns.clone().map(move |column| (column, row)));
+        squares.filter_map(|(column, row)| self.square(index, column, row)).collect()
     }
 
     /// draw the view: its water, its roads and their names
     pub fn draw(&self, surface: &mut impl Surface, view: &View) {
-        let level = self.level(view.zoom);
-        let squares = self.squares(level, view);
-        let mut names: Vec<(i64, i64, i64, i64)> = vec![];
-        for kind in ORDER {
-            for (corner, features) in &squares {
-                // the last of a square's coordinates is its far edge, where
-                // the next square starts: what is cut at the edge meets
-                // its other part there, with no gap between them
-                let pixel = |x: u32, y: u32| {
-                    let place = |local: u32, corner: u64| {
-                        let across = (local + (local >> (LOCAL_BITS - 1))) as u64;
-                        (corner + (across << level.shift >> LOCAL_BITS)).min(u32::MAX.into()) as u32
-                    };
-                    view.pixel((place(x, corner.0), place(y, corner.1)))
-                };
-                each(features, kind, |body| match kind {
-                    NAME => name(surface, view, &mut names, pixel(number(body, 0, 2), number(body, 2, 2)), &body[5..]),
-                    _ => {
-                        let points: Vec<(i64, i64)> =
-                            body.chunks_exact(4).map(|point| pixel(number(point, 0, 2), number(point, 2, 2))).collect();
-                        match kind {
-                            LAND_KIND => fill(surface, &points, LAND),
-                            WATER => fill(surface, &points, WATER_COLOUR),
-                            _ => {
-                                let (colour, width) = stroke(kind);
-                                let width = (width * view.scale / 3).max(1);
-                                points.windows(2).for_each(|ends| line(surface, ends[0], ends[1], width, colour));
-                            }
+        let squares = self.squares(self.level(view.zoom), view);
+        let (mut names, mut points) = (vec![], vec![]);
+        for kind in ORDER.into_iter().filter(|kind| !(view.moving && DETAIL.contains(kind))) {
+            for square in &squares {
+                if kind == NAME {
+                    for (point, text) in &square.names {
+                        name(surface, view, &mut names, square.pixel(view, *point), text);
+                    }
+                    continue;
+                }
+                let shapes = &square.shapes[kind as usize];
+                let mut start = 0;
+                for &end in &shapes.ends {
+                    let shape = &shapes.points[start..end as usize];
+                    start = end as usize;
+                    points.clear();
+                    points.extend(shape.iter().map(|&point| square.pixel(view, point)));
+                    // points on the same pixel are one: a view much wider than
+                    // the square's level has many to a pixel, and each costs a
+                    // line or a side of an area
+                    points.dedup();
+                    match kind {
+                        LAND_KIND => fill(surface, &points, LAND),
+                        WATER => fill(surface, &points, WATER_COLOUR),
+                        _ => {
+                            let (colour, width) = stroke(kind);
+                            let width = (width * view.scale / 3).max(1);
+                            points.windows(2).for_each(|ends| line(surface, ends[0], ends[1], width, colour));
                         }
                     }
-                });
+                }
             }
         }
     }
+}
+
+/// a square's features, sorted by kind
+fn decode(shift: u32, column: u32, row: u32, mut features: &[u8]) -> Square {
+    let at = |bytes: &[u8]| (number(bytes, 0, 2) as u16, number(bytes, 2, 2) as u16);
+    let corner = ((column as u64) << shift, (row as u64) << shift);
+    let mut square = Square { shift, corner, ..Square::default() };
+    while features.len() >= 3 {
+        let kind = features[0];
+        let (start, length) = match kind {
+            NAME if features.len() >= 6 => (1, 5 + features[5] as usize),
+            NAME => break,
+            _ => (3, number(features, 1, 2) as usize * 4),
+        };
+        let Some(body) = features.get(start..start + length) else { break };
+        match kind {
+            NAME => square.names.push((at(body), plain(&String::from_utf8_lossy(&body[5..])))),
+            kind if (kind as usize) < KINDS => {
+                let shapes = &mut square.shapes[kind as usize];
+                shapes.points.extend(body.chunks_exact(4).map(at));
+                shapes.ends.push(shapes.points.len() as u32);
+            }
+            _ => {}
+        }
+        features = &features[start + length..];
+    }
+    square
 }
 
 /// a view of several maps: the world's land and sea first, where one of
@@ -280,33 +362,8 @@ pub fn maps_in(directory: &Path) -> Vec<Map> {
     files.iter().filter_map(|path| Map::open(Source::File(Mutex::new(File::open(path).ok()?)))).collect()
 }
 
-/// call with the body of every feature of one kind among a square's: a
-/// shape's points, or a name's point, length and letters
-fn each(mut features: &[u8], wanted: u8, mut found: impl FnMut(&[u8])) {
-    while features.len() >= 3 {
-        let kind = features[0];
-        let (start, length) = match kind {
-            NAME if features.len() >= 6 => (1, 5 + features[5] as usize),
-            NAME => return,
-            _ => (3, number(features, 1, 2) as usize * 4),
-        };
-        let Some(body) = features.get(start..start + length) else { return };
-        if kind == wanted {
-            found(body);
-        }
-        features = &features[start + length..];
-    }
-}
-
 /// a street's name where it is, unless another name is there already
-fn name(
-    surface: &mut impl Surface,
-    view: &View,
-    taken: &mut Vec<(i64, i64, i64, i64)>,
-    at: (i64, i64),
-    letters: &[u8],
-) {
-    let text = plain(&String::from_utf8_lossy(letters));
+fn name(surface: &mut impl Surface, view: &View, taken: &mut Vec<(i64, i64, i64, i64)>, at: (i64, i64), text: &str) {
     let scale = (view.scale / 3).max(1);
     let (width, height) = ((text.chars().count() as u32 * ADVANCE * scale) as i64, (GLYPH_HEIGHT * scale) as i64);
     let (left, top) = (at.0 - width / 2, at.1 - height / 2);
@@ -315,53 +372,82 @@ fn name(
     let free = taken.iter().all(|&(l, t, r, b)| right < l || left > r || bottom < t || top > b);
     if on_screen && free {
         taken.push((left - height, top - height, right + height, bottom + height));
-        surface.text(left, top, scale, NAME_COLOUR, &text);
+        surface.text(left, top, scale, NAME_COLOUR, text);
     }
 }
 
-/// a line so many pixels wide, a square of them at every step along it
+/// a line so many pixels wide, drawn a run at a time: the pixels of it in
+/// one row, where it is nearer level than upright, or in one column, as one
+/// rectangle. a picture of streets is tens of thousands of pixels of lines,
+/// and a rectangle for each costs the esp32-p4 more than the picture's time
 fn line(surface: &mut impl Surface, from: (i64, i64), to: (i64, i64), width: u32, colour: [u8; 3]) {
     let (wide, high) = surface.size();
     let off = |a: i64, b: i64, size: u32| (a < 0 && b < 0) || (a > size as i64 && b > size as i64);
     if off(from.0, to.0, wide) || off(from.1, to.1, high) {
         return;
     }
-    let (across, down) = ((to.0 - from.0).abs(), (to.1 - from.1).abs());
-    let (step_x, step_y) = ((to.0 - from.0).signum(), (to.1 - from.1).signum());
-    let (mut x, mut y, mut error, half) = (from.0, from.1, across - down, (width / 2) as i64);
-    loop {
-        surface.rect(x - half, y - half, width, width, colour);
-        if (x, y) == to {
-            return;
-        }
-        let twice = 2 * error;
-        if twice > -down {
-            error -= down;
-            x += step_x;
-        }
-        if twice < across {
-            error += across;
-            y += step_y;
-        }
+    let (half, thick) = ((width / 2) as i64, width as i64 - 1);
+    if (to.0 - from.0).abs() >= (to.1 - from.1).abs() {
+        runs((from.0, from.1), (to.0, to.1), (-half - 1, wide as i64 + half), &mut |x, length, y| {
+            surface.rect(x - half, y - half, (length + thick) as u32, width, colour)
+        });
+    } else {
+        runs((from.1, from.0), (to.1, to.0), (-half - 1, high as i64 + half), &mut |y, length, x| {
+            surface.rect(x - half, y - half, width, (length + thick) as u32, colour)
+        });
     }
 }
 
+/// the runs of a line along the axis it goes furthest on, a, as where each
+/// starts on it, how long it is, and where it is on the other axis, b. only
+/// the part of it within bounds on a: the rest is off the picture
+fn runs(from: (i64, i64), to: (i64, i64), (low, high): (i64, i64), run: &mut impl FnMut(i64, i64, i64)) {
+    let ((a0, b0), (a1, b1)) = if from.0 <= to.0 { (from, to) } else { (to, from) };
+    let span = (a1 - a0).max(1);
+    // the nearest whole place on b, halves up
+    let b_at = |a: i64| b0 + (2 * (b1 - b0) * (a - a0) + span).div_euclid(2 * span);
+    let (first, last) = (a0.max(low), a1.min(high));
+    if first > last {
+        return;
+    }
+    let (mut start, mut b) = (first, b_at(first));
+    for a in first + 1..=last {
+        let next = b_at(a);
+        if next != b {
+            run(start, a - start, b);
+            (start, b) = (a, next);
+        }
+    }
+    run(start, last + 1 - start, b);
+}
+
 /// an area filled, a row of the picture at a time: between every other
-/// pair of the places its outline crosses the row
+/// pair of the places its outline crosses the row. the sides are taken in
+/// the order they start down the picture, and a row looks only at those it
+/// is among: a continent's outline has thousands, a row a handful
 fn fill(surface: &mut impl Surface, outline: &[(i64, i64)], colour: [u8; 3]) {
     let high = surface.size().1 as i64;
-    let rows = outline.iter().map(|point| point.1);
-    let (Some(top), Some(bottom)) = (rows.clone().min(), rows.max()) else { return };
-    for y in top.max(0)..=bottom.min(high - 1) {
-        let sides = outline.iter().zip(outline.iter().cycle().skip(1));
-        let mut crossings: Vec<i64> = sides
-            .filter(|(a, b)| (a.1 <= y) != (b.1 <= y))
-            .map(|(a, b)| a.0 + (y - a.1) * (b.0 - a.0) / (b.1 - a.1))
-            .collect();
+    let sides = outline.iter().zip(outline.iter().cycle().skip(1));
+    let mut sides: Vec<((i64, i64), (i64, i64))> = sides
+        .filter(|(a, b)| a.1 != b.1)
+        .map(|(&a, &b)| if a.1 < b.1 { (a, b) } else { (b, a) })
+        .filter(|(top, bottom)| bottom.1 > 0 && top.1 < high)
+        .collect();
+    sides.sort_unstable_by_key(|(top, _)| top.1);
+    let (Some(first), Some(last)) = (sides.first(), sides.iter().map(|(_, bottom)| bottom.1).max()) else { return };
+    let (mut next, mut among, mut crossings) = (0, vec![], vec![]);
+    for y in first.0 .1.max(0)..last.min(high) {
+        while next < sides.len() && sides[next].0 .1 <= y {
+            among.push(sides[next]);
+            next += 1;
+        }
+        among.retain(|(_, bottom)| bottom.1 > y);
+        crossings.clear();
+        crossings.extend(among.iter().map(|(a, b)| a.0 + (y - a.1) * (b.0 - a.0) / (b.1 - a.1)));
         crossings.sort_unstable();
-        crossings
-            .chunks_exact(2)
-            .for_each(|pair| surface.rect(pair[0], y, (pair[1] - pair[0]).max(1) as u32, 1, colour));
+        for pair in crossings.chunks_exact(2) {
+            surface.rect(pair[0], y, (pair[1] - pair[0]).max(1) as u32, 1, colour);
+        }
     }
 }
 
@@ -399,7 +485,7 @@ mod tests {
         let full = [0, 0, 0xffff, 0, 0xffff, 0xffff, 0, 0xffff];
         let maps = [(0, 0), (1, 0), (0, 1)].map(|place| square(20, place, &[(WATER, &full)]));
         // the corner the three share, in the middle of the picture
-        let view = View { centre: (1 << 20, 1 << 20), zoom: 12, size: (256, 256), scale: 3 };
+        let view = View { centre: (1 << 20, 1 << 20), zoom: 12, size: (256, 256), scale: 3, moving: false };
         let mut canvas = Canvas::new(256, 256);
         draw(&maps, &mut canvas, &view);
         for x in 120..136 {
@@ -418,7 +504,7 @@ mod tests {
         let world = square(30, (1, 1), &[(LAND_KIND, &land)]);
         assert!(world.is_world() && !one_square().is_world());
         let middle = (1u32 << 31) - (1 << 26);
-        let view = View { centre: (middle, middle), zoom: 20, size: (256, 256), scale: 3 };
+        let view = View { centre: (middle, middle), zoom: 20, size: (256, 256), scale: 3, moving: false };
         let mut canvas = Canvas::new(256, 256);
         assert!(draw(&[one_square(), world], &mut canvas, &view), "the world has every place");
         assert_eq!(pixel(&canvas, 10, 128), LAND, "land, left of where it ends");
@@ -436,7 +522,7 @@ mod tests {
     fn draws_the_road_and_the_water_of_the_square_in_view() {
         let (map, mut canvas) = (one_square(), Canvas::new(256, 256));
         // the whole square, 2^20 units wide, on 256 pixels
-        let view = View { centre: map.middle(), zoom: 12, size: (256, 256), scale: 3 };
+        let view = View { centre: map.middle(), zoom: 12, size: (256, 256), scale: 3, moving: false };
         canvas.fill(LAND);
         map.draw(&mut canvas, &view);
         assert_eq!(pixel(&canvas, 10, 128), stroke(MAIN).0, "the road, at the left of its row");
@@ -449,11 +535,24 @@ mod tests {
     #[test]
     fn a_closer_view_draws_everything_further_apart() {
         let (map, mut canvas) = (one_square(), Canvas::new(256, 256));
-        let view = View { centre: map.middle(), zoom: 11, size: (256, 256), scale: 3 };
+        let view = View { centre: map.middle(), zoom: 11, size: (256, 256), scale: 3, moving: false };
         canvas.fill(LAND);
         map.draw(&mut canvas, &view);
         assert_eq!(pixel(&canvas, 128, 128), stroke(MAIN).0, "the road still through the middle");
         assert_eq!(pixel(&canvas, 48, 48), LAND, "and the pond out of the picture");
+    }
+
+    #[test]
+    fn a_map_being_moved_leaves_out_its_small_streets_until_it_stops() {
+        let map = square(20, (0, 0), &[(MAIN, &[0, 0x8000, 0xffff, 0x8000]), (MINOR, &[0, 0x4000, 0xffff, 0x4000])]);
+        let still = View { centre: map.middle(), zoom: 12, size: (256, 256), scale: 3, moving: false };
+        for (view, minor) in [(still, stroke(MINOR).0), (View { moving: true, ..still }, LAND)] {
+            let mut canvas = Canvas::new(256, 256);
+            canvas.fill(LAND);
+            map.draw(&mut canvas, &view);
+            assert_eq!(pixel(&canvas, 128, 128), stroke(MAIN).0, "a main road always");
+            assert_eq!(pixel(&canvas, 128, 64), minor, "a small street only when still");
+        }
     }
 
     #[test]

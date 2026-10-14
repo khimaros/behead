@@ -47,10 +47,13 @@ TYPING = {
     "Semicolon": 74, "Quote": 75, "Slash": 76, "Delete": 112,
 }
 KEYS = {**BUTTONS, **TYPING}
+# keys that turn the knob a detent, as the wheel does, for a keyboard alone.
+# down is the wheel rolled toward the hand, which is clockwise
+TURNS = {"PageUp": -1, "PageDown": 1}
 ROTARY = 65536
 # what a headunit has to advertise for the page's controls to reach the phone
 KEYCODES = sorted({*KEYS.values(), ROTARY})
-HELP = ("mouse: finger. wheel: knob. arrows: tilt. enter: click, held for a second: the knob's next use. "
+HELP = ("mouse: finger. wheel, or page up and down: knob. arrows: tilt. enter: click, held for a second: the knob's next use. "
         "escape: back. home: home. the rest of the keyboard types. sound: after a click or a key")
 # degrees as the car's location sensor sends them
 DEGREES_E7 = 10 ** 7
@@ -110,10 +113,18 @@ const button = (event, pressed) => {{
   event.preventDefault();
   fetch(`/button?code=${{code}}&pressed=${{pressed}}`);
 }};
-onkeydown = (event) => button(event, 1);
+// one notch of the wheel is one detent of the knob, and so is a press of
+// page up or down, or each time one held repeats
+const turns = {json.dumps(TURNS)};
+const turn = (delta) => fetch(`/turn?delta=${{delta}}`);
+onkeydown = (event) => {{
+  const delta = turns[event.code];
+  if (delta === undefined || event.target === place) return button(event, 1);
+  event.preventDefault();
+  turn(delta);
+}};
 onkeyup = (event) => button(event, 0);
-// one notch of the wheel is one detent of the knob
-onwheel = (event) => fetch(`/turn?delta=${{Math.sign(event.deltaY)}}`);
+onwheel = (event) => turn(Math.sign(event.deltaY));
 // sound: /audio is pcm without end, played a piece at a time, each where the
 // last one stops. a browser plays nothing before a click or a key
 let sound;

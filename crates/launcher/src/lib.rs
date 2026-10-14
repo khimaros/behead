@@ -240,7 +240,8 @@ impl App {
         // the demo's bar moves in every picture, and a long name a few
         // times a second
         let moving = ((self.screen == Screen::Demo).then_some(frame), self.slides(slide_step(fps, frame)));
-        let mapped = (self.screen == Screen::Map).then_some((self.centre, self.zoom, self.car, self.maps.len()));
+        let map = (self.centre, self.zoom, self.car, self.maps.len(), self.finger.is_some());
+        let mapped = (self.screen == Screen::Map).then_some(map);
         let mut hasher = DefaultHasher::new();
         (self.size, self.screen, self.tile, listed, now, moving, mapped).hash(&mut hasher);
         hasher.finish()
@@ -447,7 +448,8 @@ impl App {
                 self.cursor = self.cursor.saturating_add_signed(by as isize).min(self.entries().saturating_sub(1));
                 self.reveal();
             }
-            Screen::Map => self.act(Action::Zoom(by)),
+            // a wheel rolled up, as a map on a desk has it, is closer
+            Screen::Map => self.act(Action::Zoom(-by)),
             Screen::Demo => {}
         }
     }
@@ -586,7 +588,8 @@ impl App {
     /// the car on it where it is in the picture
     fn render_map(&self, surface: &mut impl Surface) {
         let scale = self.scale();
-        let view = map::View { centre: self.centre, zoom: self.zoom, size: self.size, scale };
+        let moving = self.finger.is_some();
+        let view = map::View { centre: self.centre, zoom: self.zoom, size: self.size, scale, moving };
         if !map::draw(&self.maps, surface, &view) {
             write(surface, Area { x: 0, y: 0, width: self.size.0, height: self.size.1 }, scale, true, TEXT, NO_MAP);
         }
@@ -715,8 +718,9 @@ mod tests {
         let (mut app, player, _) = launcher("knob");
         feed(&mut app, &["relative 65536 1", "button 23 down", "button 23 up"]);
         assert_eq!(app.screen, Screen::Map);
-        feed(&mut app, &["location 36.0 -86.0 - - - -", "relative 65536 1", "relative 65536 -3"]);
-        assert_eq!((app.car, app.zoom), (Some(map::world(36.0, -86.0)), map::ZOOM_START + 2), "a turn back is wider");
+        feed(&mut app, &["location 36.0 -86.0 - - - -", "relative 65536 -1", "relative 65536 3"]);
+        let wider = (Some(map::world(36.0, -86.0)), map::ZOOM_START + 2);
+        assert_eq!((app.car, app.zoom), wider, "clockwise, which is a wheel rolled down, is wider");
         feed(&mut app, &["touch down 0 0:100,100", "touch move 0 0:90,100", "touch up 0 0:90,100"]);
         assert_eq!(app.centre.0, map::world(36.0, -86.0).0 + (10 << app.zoom), "a finger takes the map with it");
         feed(&mut app, &["button 23 down"]);

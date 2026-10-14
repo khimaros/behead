@@ -97,13 +97,24 @@ pub trait Surface {
     /// a filled rectangle, clipped to the surface
     fn rect(&mut self, x: i64, y: i64, width: u32, height: u32, colour: [u8; 3]);
 
+    /// a run of a glyph's row as one rectangle: a rectangle for each of its
+    /// dots costs the esp32-p4 a picture's time over a screen of names
     fn text(&mut self, x: i64, y: i64, scale: u32, colour: [u8; 3], text: &str) {
         for (index, c) in text.chars().enumerate() {
             let left = x + (index as u32 * ADVANCE * scale) as i64;
-            for (row, bits) in font::glyph(c).iter().enumerate() {
-                for column in (0..font::WIDTH).filter(|column| bits & (1 << (font::WIDTH - 1 - column)) != 0) {
-                    let (px, py) = (left + (column * scale) as i64, y + (row as u32 * scale) as i64);
-                    self.rect(px, py, scale, scale, colour);
+            for (row, &bits) in font::glyph(c).iter().enumerate() {
+                let set = |column: u32| column < font::WIDTH && bits & (1 << (font::WIDTH - 1 - column)) != 0;
+                let mut column = 0;
+                while column < font::WIDTH {
+                    let start = column;
+                    while set(column) {
+                        column += 1;
+                    }
+                    if column > start {
+                        let (px, py) = (left + (start * scale) as i64, y + (row as u32 * scale) as i64);
+                        self.rect(px, py, (column - start) * scale, scale, colour);
+                    }
+                    column += 1;
                 }
             }
         }

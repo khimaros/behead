@@ -52,6 +52,15 @@ class ViewerControls(unittest.TestCase):
         self.assertEqual(asked, [("button", fakehu.DPAD_LEFT, True), ("button", fakehu.DPAD_LEFT, False),
                                  ("turn", fakehu.ROTARY, -2)])
 
+    def test_page_up_and_down_turn_the_knob_as_the_wheel_does(self):
+        """for a keyboard without a mouse: down is the wheel rolled toward
+        the hand, which is a turn clockwise, and held, they go on turning"""
+        self.assertEqual(viewer.TURNS, {"PageUp": -1, "PageDown": 1})
+        self.assertNotIn("PageUp", viewer.KEYS, "a key that turns presses no button too")
+        page = viewer.PAGE.decode().replace(" ", "")
+        self.assertIn("turns[event.code]", page)
+        self.assertIn('"PageDown":1', page)
+
     def test_a_place_typed_into_the_page_is_where_the_car_is(self):
         """a car knows where it is and the page's does not, so the page
         takes a place, in degrees, to send as the car's sensor would"""

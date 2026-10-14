@@ -594,7 +594,8 @@ pictures fall behind, which is the test for a stall that takes minutes.
 `make headunit` makes the browser the headunit of whatever device is on
 the cable, a pi or an esp32-p4: its video on a page,
 which opens by itself, and the mouse on the picture as a finger. the mouse
-wheel turns a rotary knob, the arrow keys tilt it and enter clicks it;
+wheel turns a rotary knob, and so do page up and page down, a detent a
+press and on while held; the arrow keys tilt it and enter clicks it;
 escape is back and the home key is home. the rest of the keyboard types:
 letters, digits, punctuation and shift go to the device as a keyboard's
 keys, for a session that takes them (`--uinput`). ctrl-c stops it. the page plays the device's

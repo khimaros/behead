@@ -66,8 +66,18 @@ touch. it runs on a raspberry pi 4, tested from a laptop over usb, and a
   instead, clockwise toward the hand, of a pointer that stays in the middle
   of the screen: it zooms a map that zooms for nothing else, as comaps
   does, about its middle, and scrolls whatever else is there. the phosh
-  session draws no pointer. the pi image's kodi session uses `arrows`; `KNOB` in
-  `/etc/behead/behead.env` sets it for the others
+  session draws no pointer. `type` writes into whatever takes text: a detent
+  writes a letter, the next one another in its place (a to z, a space, 1 to
+  0), a click keeps it, a click with no letter to keep is enter, and the
+  back button takes a letter away. several of them with `,` between, as in
+  `--knob focus,arrows,scroll,type`, are stepped through by a long click of
+  the knob, and the session is told which it is on with a line `knob type`.
+  the pi image's kodi session uses `arrows` and its phosh session all four;
+  `KNOB` in `/etc/behead/behead.env` sets it for the others
+- `--back`: what the car's back button is on `behead keys`: `back`, the
+  default, or `escape`, which closes a menu or a dialog in applications made
+  for a desk. the pi image's phosh session uses `escape`; `BACK` beside
+  `KNOB` sets it
 - `--nmea-socket`: offer the car's location on a unix socket at this path,
   as the nmea sentences of a gps receiver (GGA and RMC), for a location
   service to read. a reader gets the latest fix when it connects and every
@@ -256,8 +266,12 @@ chooses another: `light`, or `car`, which is dark until the car says it is
 day and follows the car from then on. on the pi it is a line of
 `/etc/behead/session.env`. a car without a touchscreen drives it with its knob: a turn
 moves between the overview's icons, a click opens one, and the home button
-goes to the overview and back. where something wants text, phosh brings up
-its keyboard on the screen (squeekboard, when it is installed).
+goes to the overview and back. a click held for most of a second takes the
+knob to its next use, which a note on the screen names: from moving between
+things, to moving up and down a list, to a map's zoom, to writing, and round
+again. back closes a menu or a dialog. where something wants text, phosh
+brings up its keyboard on the screen for a finger (squeekboard, when it is
+installed); the knob writes without it.
 
 the session runs a pulseaudio of its own, so its applications have sound.
 it plays into the same alsa loopback as kodi, and the same command records
@@ -506,10 +520,12 @@ see [esp32/README.md](esp32/README.md) for what it needs and what it lacks.
 ## launcher
 
 `behead-launcher` is a video source like `behead-demo`, made for the car: a
-home screen with two tiles, MUSIC and INPUTS. it is what the esp32-p4
+home screen of tiles in two rows of three, of which three are taken: MUSIC,
+MAP and INPUTS. it is what the esp32-p4
 firmware shows, a session of the pi image (`make image-rpi
 SESSION=launcher`), and runs on any linux through its session script,
-which plays `~/Music`, or `$BEHEAD_MEDIA/music`:
+which plays `~/Music`, or `$BEHEAD_MEDIA/music`, and draws the maps in a
+`maps` folder beside it:
 
     behead --cert phone.crt --key phone.key \
         --video-cmd 'sessions/launcher.sh {width} {height} {fps}' \
@@ -523,11 +539,31 @@ a named pipe to the audio command. `behead-launcher` has to be on the path.
   pauses the one playing. tracks follow each other in the order listed, on
   into the next folder. BACK leaves a folder, UP and DOWN move the list a
   page, and PREV, PLAY or PAUSE and NEXT are under it.
+- MAP draws the roads, the water and the street names around the car, from
+  the `.bmap` files under `--maps`, with no network: it shows and follows
+  where the car's sensor says it is, and neither searches nor finds a route.
+  a turn of the knob, or + and -, makes it closer or wider, a finger moves
+  it, and a click or HERE has it back around the car. a map is made on
+  another machine, of an area by its west, south, east and north edges in
+  degrees, from openstreetmap's data, whose contributors it is owed to:
+
+      tools/fetch-map.py san-francisco.bmap -122.52,37.70,-122.35,37.83
+      tools/fetch-map.py world.bmap world
+
+  san francisco is under a megabyte, nashville and what is around it under
+  three. the second is a map of the whole world, half a megabyte of its
+  land and lakes from natural earth, which the launcher draws under the
+  others and alone where it has no other: coarse, a shore a few kilometres
+  out of place when seen from close, but there at any size, out to the
+  whole world on the screen. without it a map has no sea, and its land
+  ends where its roads do.
 - INPUTS is the demo's screen, for trying a car's controls.
-- without a touchscreen: the knob, or the arrow keys, moves along the tiles
-  and the list, a click chooses, the car's back button leaves a folder or a
-  screen, and home returns to the tiles. the car's play, pause, next and
-  previous keys work on every screen.
+- without a touchscreen: the knob moves along the tiles and the list, and
+  makes the map closer or wider. a car's four arrows go to the tile that
+  way, up and down the list, and move the map a quarter of the screen. a
+  click chooses, the car's back button leaves a folder or a screen, and
+  home returns to the tiles. the car's play, pause, next and previous keys
+  work on every screen.
 
 names are shown in capitals, with digits and common punctuation. a letter
 with an accent or another mark is shown without it, as far as the latin of

@@ -1,0 +1,5 @@
+# on top of sdkconfig.defaults, for ESP32_CHIP=v3: a chip of revision v3 or
+# later, which differs from the earlier ones too far for one build to run
+# on both
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=n
+CONFIG_ESP32P4_REV_MIN_300=y

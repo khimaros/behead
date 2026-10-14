@@ -32,6 +32,12 @@ FOCUS_RING = (20, 108, 95, 118)
 RING_BLUE, RING_PIXELS = 50, 100
 # more turns than the overview has places for focus to rest
 MAX_TURNS = 8
+# longer than the server takes a held click for a long one
+LONG_CLICK = 0.8
+# where the shell shows a note, under its top bar, and how much of that the
+# note changes. a text cursor that blinks there is far less
+NOTE_BOX = (250, 30, 550, 90)
+NOTE_SHARE = 0.15
 # how long a move of focus takes to reach the car's picture
 SETTLE = 1
 # the demo's background and its marker for the first finger
@@ -89,6 +95,13 @@ class PhoshSession(desktop.DesktopTest):
         pixels = (frame[(y * desktop.WIDTH + x) * 3:(y * desktop.WIDTH + x) * 3 + 3]
                   for y in range(top, bottom) for x in range(left, right))
         return sum(1 for pixel in pixels if wanted(pixel)) if frame else 0
+
+    @classmethod
+    def box(cls, box):
+        """the pixels of a box in the latest picture"""
+        frame, (left, top, right, bottom) = cls.last_frame(), box
+        return [bytes(frame[(y * desktop.WIDTH + x) * 3:(y * desktop.WIDTH + x) * 3 + 3])
+                for y in range(top, bottom) for x in range(left, right)]
 
     @classmethod
     def prepare(cls):
@@ -234,6 +247,38 @@ class PhoshFollowingTheCarTest(PhoshSession):
         for night, style in ((0, LIGHT_STYLE), (1, DARK_STYLE)):
             self.tell(night)
             self.wait_for(lambda: self.style() == style, f"asked for {style}, still {self.style()}")
+
+
+class PhoshKnobTest(PhoshSession):
+    """a car with a knob, its click and a back button, and no touchscreen"""
+
+    @classmethod
+    def server_options(cls):
+        return [*super().server_options(), "--knob", "focus,type", "--back", "escape"]
+
+    def long_click(self):
+        self.headunit.button(fakehu.DPAD_CENTER, True)
+        self.pump_for(LONG_CLICK)
+        self.headunit.button(fakehu.DPAD_CENTER, False)
+
+    def test_the_knob_writes_into_the_search_and_says_so(self):
+        """the first turn is on the overview's search. a long click makes
+        the knob write, which the shell says in a note, and a detent back
+        writes a digit no application has in its name, so none are left.
+        back takes the digit away again"""
+        self.headunit.turn(fakehu.ROTARY, 1)
+        self.pump_for(SETTLE)
+        before = self.box(NOTE_BOX)
+        self.long_click()
+
+        def noted():
+            now = self.box(NOTE_BOX)
+            return sum(old != new for old, new in zip(before, now)) / len(before) >= NOTE_SHARE
+        self.wait_for(noted, "said what the knob does now")
+        self.headunit.turn(fakehu.ROTARY, -1)
+        self.wait_for(lambda: self.count(APP_ICON_BOX, is_light) < ICON_PIXELS, "left no application for a 0")
+        self.press(fakehu.BACK)
+        self.wait_for(lambda: self.count(APP_ICON_BOX, is_light) >= ICON_PIXELS, "showed them again with the 0 gone")
 
 
 class LightPhoshTest(PhoshSession):

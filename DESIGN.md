@@ -306,7 +306,15 @@ car as local hardware, without a per-compositor injection path.
   while keys go to whatever has focus. no pair of keys suits every
   application, so `--knob` picks: tab and shift+tab, which most toolkits
   read as next and previous, or down and up for kodi, where tab switches
-  to the player. the wheel is there all the same, as `--knob scroll`, for
+  to the player. an application made for a desk wants all of them at
+  different moments, so `--knob` takes a list, and the knob's click, held,
+  steps through it (`Dial` in uinput.rs): the click then counts when it is
+  let go, by how long it was down, where otherwise an application gets it
+  as it is. writing is one of the uses, with no keyboard drawn for it: the
+  text an application shows is where the letter being chosen is seen, each
+  detent a backspace and the next letter. the server cannot draw, so it
+  names the knob's use to the session on a line, and phosh.sh has the shell
+  show it as a note. the wheel is there all the same, as `--knob scroll`, for
   the one thing nothing else does: comaps, a map made for a desk, zooms for
   a wheel and not for a key, a double tap or two fingers. the wheel is a
   device of its own, `behead knob`, with the button and the two axes a wheel
@@ -395,10 +403,24 @@ uinput, libinput, the compositor and screen capture.
 ## launcher
 
 `crates/launcher` is an application made for the car's screen and for the
-smallest host, the esp32-p4: a home screen of tiles, a music player, and
-the demo as an input test. it is a library, which the firmware links, and
+smallest host, the esp32-p4: a home screen of tiles, a music player, a map,
+and the demo as an input test. it is a library, which the firmware links, and
 `behead-launcher`, a video source like `behead-demo` for linux, which is
-what the end-to-end tests run. three parts:
+what the end-to-end tests run. four parts:
+
+- the map (`map.rs`), drawn from a file of the launcher's own kind and not
+  from a web map's tiles: pictures of a city are large and one size, and
+  vector tiles want a renderer many times the launcher. `tools/fetch-map.py`
+  asks openstreetmap's overpass service for an area's roads and water and
+  writes them as lines, cut into squares at three levels of detail, which
+  the file lists by where each starts. a picture reads the squares it
+  shows, of the level whose squares are at least 256 pixels on it, and
+  draws their lines itself, so the same file serves any screen and the
+  chip reads a few kilobytes a picture. places are whole numbers, 2^32
+  around the world, and a view is a power of two of them to a pixel: no
+  fractions, which the chip is slow at. the car's place comes as the
+  server's `location` line, which the firmware now passes on too
+  (`aap::sensors`, which the server had to itself)
 
 - the screens (`lib.rs`). `App` takes the server's input lines and draws on
   a `Surface`. a screen's buttons are one list of areas with what each

@@ -50,8 +50,10 @@ KEYS = {**BUTTONS, **TYPING}
 ROTARY = 65536
 # what a headunit has to advertise for the page's controls to reach the phone
 KEYCODES = sorted({*KEYS.values(), ROTARY})
-HELP = ("mouse: finger. wheel: knob. arrows: tilt. enter: click. escape: back. home: home. "
-        "the rest of the keyboard types. sound: after a click or a key")
+HELP = ("mouse: finger. wheel: knob. arrows: tilt. enter: click, held for a second: the knob's next use. "
+        "escape: back. home: home. the rest of the keyboard types. sound: after a click or a key")
+# degrees as the car's location sensor sends them
+DEGREES_E7 = 10 ** 7
 # what media audio is until a headunit says: its rate and channels
 AUDIO_FORMAT = (48000, 2)
 SAMPLE_BYTES = 2
@@ -67,7 +69,9 @@ UNSELECTABLE = "user-select:none;-webkit-user-select:none;touch-action:none"
 PAGE = f"""<!doctype html><title>behead headunit</title>
 <body style="margin:0;background:#000;display:flex;justify-content:center;align-items:center;height:100vh;{UNSELECTABLE}">
 <p id="waiting" style="color:#888;font:16px sans-serif">waiting for video</p>
-<p style="position:fixed;bottom:0;margin:4px;color:#666;font:12px sans-serif">{HELP}</p>
+<p style="position:fixed;bottom:0;margin:4px;color:#666;font:12px sans-serif">{HELP}
+<input id="place" placeholder="where the car is: 37.7749,-122.4194, then enter" size="40"
+  style="background:#111;color:#888;border:1px solid #333;font:12px sans-serif"></p>
 <img id="picture" draggable="false" style="max-width:100%;max-height:100%;display:none;{UNSELECTABLE}">
 <script>
 // looked up by id: a bare `screen` would be the browser's own window.screen
@@ -92,9 +96,17 @@ picture.onmousedown = picture.ondragstart = (event) => event.preventDefault();
 // the keyboard is the car's buttons, and a keyboard. a held key repeats
 // here, a held button does not: the phone repeats what is held down itself
 const keys = {json.dumps(KEYS)};
+// the one place on the page that is typed into itself: where the car is,
+// which a car's sensor says and this page has to be told
+const place = document.getElementById("place");
+place.onchange = () => {{
+  const [latitude, longitude] = place.value.split(",").map(Number);
+  if (isFinite(latitude) && isFinite(longitude)) fetch(`/location?latitude=${{latitude}}&longitude=${{longitude}}`);
+  place.blur();
+}};
 const button = (event, pressed) => {{
   const code = keys[event.code];
-  if (code === undefined || event.repeat) return;
+  if (code === undefined || event.repeat || event.target === place) return;
   event.preventDefault();
   fetch(`/button?code=${{code}}&pressed=${{pressed}}`);
 }};
@@ -268,6 +280,9 @@ class Viewer:
                     viewer.controls.put(("button", int(query["code"]), query["pressed"] == "1"))
                 elif url.path == "/turn":
                     viewer.controls.put(("turn", ROTARY, int(query["delta"])))
+                elif url.path == "/location":
+                    place = (round(float(query[name]) * DEGREES_E7) for name in ("latitude", "longitude"))
+                    viewer.controls.put(("location", *place))
                 frame = url.path == "/frame.jpg"
                 body = viewer.latest if frame else PAGE if url.path == "/" else b""
                 self.send_response(200 if body else 204)

@@ -52,6 +52,13 @@ class ViewerControls(unittest.TestCase):
         self.assertEqual(asked, [("button", fakehu.DPAD_LEFT, True), ("button", fakehu.DPAD_LEFT, False),
                                  ("turn", fakehu.ROTARY, -2)])
 
+    def test_a_place_typed_into_the_page_is_where_the_car_is(self):
+        """a car knows where it is and the page's does not, so the page
+        takes a place, in degrees, to send as the car's sensor would"""
+        self.ask("/location?latitude=37.7749&longitude=-122.4194")
+        self.assertEqual(self.viewer.controls.get(timeout=fakehu.TIMEOUT), ("location", 377749000, -1224194000))
+        self.assertIn('id="place"', viewer.PAGE.decode())
+
     def test_what_the_car_plays_reaches_a_page_that_listens(self):
         self.viewer.play(44100, 1, b"before anyone listened")
         with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/audio", timeout=fakehu.TIMEOUT) as response:

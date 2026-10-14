@@ -25,8 +25,11 @@ import test_usb as usb_tier
 import viewer
 
 ACTIONS = {"down": fakehu.TOUCH_DOWN, "move": fakehu.TOUCH_MOVED, "up": fakehu.TOUCH_UP}
-# what the page's keys and wheel become
-CONTROLS = {"button": fakehu.FakeHeadunit.button, "turn": fakehu.FakeHeadunit.turn}
+# what the page's keys and wheel become, and a place typed into it: a fix
+# from the car's location sensor, with no time and nothing but the place
+CONTROLS = {"button": fakehu.FakeHeadunit.button, "turn": fakehu.FakeHeadunit.turn,
+            "location": lambda headunit, latitude, longitude: headunit.sense(
+                fakehu.SENSOR_LOCATION, None, latitude, longitude)}
 
 
 def waiting(events):

@@ -156,6 +156,14 @@ class RpiSessions(unittest.TestCase):
         self.assertIn("KNOB=arrows\n", self.env.read_text())
         self.assertIn(" --knob ${KNOB} ", UNIT.read_text())
 
+    def test_phosh_is_worked_by_a_knob_alone(self):
+        """applications made for a desk want more of a knob than one kind
+        of key: phosh's steps through its uses, and back closes things"""
+        self.collect(SESSION="phosh")
+        self.assertIn("KNOB=focus,arrows,scroll,type\n", self.env.read_text())
+        self.assertIn("BACK=escape\n", self.env.read_text())
+        self.assertIn(" --back ${BACK} ", UNIT.read_text())
+
     def test_kodi_renders_on_the_gpu(self):
         self.collect(SESSION="kodi")
         self.assertIn("BEHEAD_RENDERER=gles2\n", self.env.read_text())

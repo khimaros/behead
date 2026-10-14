@@ -8,6 +8,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
+use std::time::{Duration, Instant};
 
 const UINPUT_PATH: &str = "/dev/uinput";
 const TOUCHSCREEN_NAME: &str = "behead touchscreen";
@@ -111,6 +112,21 @@ const KEY_TAB: u16 = 15;
 const KEY_LEFTSHIFT: u16 = 42;
 const KEY_UP: u16 = 103;
 const KEY_DOWN: u16 = 108;
+const KEY_ESC: u16 = 1;
+const KEY_BACKSPACE: u16 = 14;
+const KEY_ENTER: u16 = 28;
+/// android's codes for the two buttons that go with a knob: its click and back
+const CLICK: u32 = 23;
+const BACK: u32 = 4;
+/// what the knob types, in the order a turn goes through them: a to z, the
+/// space, and 1 to 0 as a keyboard has them
+#[rustfmt::skip]
+const TYPED: [u16; 37] = [
+    30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, 50, 49, 24, 25, 16, 19, 31, 20, 22, 47, 17, 45, 21, 44,
+    57, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+];
+/// a click held this long steps the knob to its next use
+const LONG_CLICK: Duration = Duration::from_millis(600);
 /// detents typed out of one turn, so a wild delta cannot hold the session up
 const MAX_DETENTS: u32 = 32;
 
@@ -127,18 +143,27 @@ pub enum Knob {
     /// a notch of a mouse's wheel, which is how a map made for a desk zooms
     /// and has no other way that a car has: not a key, not two fingers
     Scroll,
+    /// a letter into whatever takes text, the next or the one before in
+    /// its place with every detent: a car's knob is all it has to write with
+    Type,
 }
+
+/// the names `--knob` takes, as a turn's line to the session gives them too
+const KNOBS: [(&str, Knob); 4] =
+    [("focus", Knob::Focus), ("arrows", Knob::Arrows), ("scroll", Knob::Scroll), ("type", Knob::Type)];
 
 impl std::str::FromStr for Knob {
     type Err = String;
 
     fn from_str(name: &str) -> Result<Self, String> {
-        match name {
-            "focus" => Ok(Self::Focus),
-            "arrows" => Ok(Self::Arrows),
-            "scroll" => Ok(Self::Scroll),
-            _ => Err(format!("--knob takes focus, arrows or scroll, not {name}")),
-        }
+        let known = KNOBS.iter().find(|(known, _)| *known == name).map(|(_, knob)| *knob);
+        known.ok_or(format!("--knob takes focus, arrows, scroll or type, or several with , between, not {name}"))
+    }
+}
+
+impl std::fmt::Display for Knob {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str(KNOBS.iter().find(|(_, knob)| knob == self).map_or("", |(name, _)| name))
     }
 }
 
@@ -150,12 +175,16 @@ impl Knob {
             (Self::Focus, false) => &[KEY_LEFTSHIFT, KEY_TAB],
             (Self::Arrows, true) => &[KEY_DOWN],
             (Self::Arrows, false) => &[KEY_UP],
-            (Self::Scroll, _) => &[],
+            (Self::Scroll | Self::Type, _) => &[],
         }
     }
 
+    /// every key a turn or a click may come out as
     fn keys(self) -> impl Iterator<Item = u16> {
-        [true, false].into_iter().flat_map(move |clockwise| self.chord(clockwise).iter().copied())
+        let typed: &[u16] = if self == Self::Type { &TYPED } else { &[] };
+        let beside: &[u16] = if self == Self::Type { &[KEY_ENTER, KEY_BACKSPACE] } else { &[] };
+        let chords = [true, false].into_iter().flat_map(move |clockwise| self.chord(clockwise).iter().copied());
+        chords.chain(typed.iter().copied()).chain(beside.iter().copied())
     }
 
     /// one detent as reports: the chord pressed, then released in reverse,
@@ -183,7 +212,116 @@ impl Knob {
         }
         let chord = self.chord(clockwise);
         let presses = chord.iter().map(|&key| (key, 1)).chain(chord.iter().rev().map(|&key| (key, 0)));
-        presses.flat_map(|(key, value)| [(EV_KEY, key, value), (EV_SYN, SYN_REPORT, 0)]).collect()
+        presses.flat_map(|(key, value)| report(key, value)).collect()
+    }
+}
+
+/// what the car's back button is: the key linux has for it, or escape, which
+/// is what closes a menu or a dialog in applications made for a desk
+#[derive(Clone, Copy, Default, PartialEq)]
+pub enum Back {
+    #[default]
+    Back,
+    Escape,
+}
+
+impl std::str::FromStr for Back {
+    type Err = String;
+
+    fn from_str(name: &str) -> Result<Self, String> {
+        match name {
+            "back" => Ok(Self::Back),
+            "escape" => Ok(Self::Escape),
+            _ => Err(format!("--back takes back or escape, not {name}")),
+        }
+    }
+}
+
+fn report(key: u16, value: i32) -> [Event; 2] {
+    [(EV_KEY, key, value), (EV_SYN, SYN_REPORT, 0)]
+}
+
+/// a key down and up again
+fn tap(key: u16) -> Vec<Event> {
+    [report(key, 1), report(key, 0)].concat()
+}
+
+/// the knob and the two buttons that go with it, its click and back: which
+/// of its uses the knob is on, stepped through by a long click when it has
+/// several, and the letter being chosen when it types
+pub struct Dial {
+    modes: Vec<Knob>,
+    mode: usize,
+    back: Back,
+    /// which of TYPED stands in the text, still to be kept or turned past
+    letter: Option<usize>,
+}
+
+impl Dial {
+    pub fn new(modes: Vec<Knob>, back: Back) -> Self {
+        Self { modes, mode: 0, back, letter: None }
+    }
+
+    pub fn mode(&self) -> Knob {
+        self.modes[self.mode]
+    }
+
+    /// whether the click means something here before it does to an
+    /// application. where it does not, the application gets it as it is
+    /// pressed and let go, and may tell a long press from a short one itself
+    fn owns_click(&self) -> bool {
+        self.modes.len() > 1 || self.mode() == Knob::Type
+    }
+
+    fn key(&self, android: u32) -> Option<u16> {
+        if android == BACK && self.back == Back::Escape {
+            Some(KEY_ESC)
+        } else {
+            linux_key(android)
+        }
+    }
+
+    /// one detent. typing, it writes the next letter, over the one a detent
+    /// before wrote
+    fn turn(&mut self, clockwise: bool) -> Vec<Event> {
+        if self.mode() != Knob::Type {
+            return self.mode().detent(clockwise);
+        }
+        let count = TYPED.len();
+        let next = match (self.letter, clockwise) {
+            (None, true) => 0,
+            (None, false) => count - 1,
+            (Some(letter), true) => (letter + 1) % count,
+            (Some(letter), false) => (letter + count - 1) % count,
+        };
+        let over = if self.letter.replace(next).is_some() { tap(KEY_BACKSPACE) } else { vec![] };
+        [over, tap(TYPED[next])].concat()
+    }
+
+    /// the click, let go: held long it steps to the knob's next use. short,
+    /// it keeps the letter being chosen, and is enter where there is none
+    fn click(&mut self, long: bool) -> Vec<Event> {
+        if long && self.modes.len() > 1 {
+            (self.mode, self.letter) = ((self.mode + 1) % self.modes.len(), None);
+            return vec![];
+        }
+        if self.letter.take().is_some() {
+            vec![]
+        } else {
+            tap(KEY_ENTER)
+        }
+    }
+
+    /// the back button, which takes a letter away while typing
+    fn back(&mut self, pressed: bool) -> Vec<Event> {
+        match (self.mode(), pressed) {
+            (Knob::Type, true) => {
+                self.letter = None;
+                tap(KEY_BACKSPACE)
+            }
+            (Knob::Type, false) => vec![],
+            _ => self.key(BACK).map(|key| report(key, pressed as i32).to_vec()).unwrap_or_default(),
+        }
     }
 }
 
@@ -346,17 +484,20 @@ pub struct Devices {
     touchscreen: Option<Touchscreen>,
     keys: Option<Device>,
     wheel: Option<Device>,
-    knob: Knob,
+    dial: Dial,
+    /// when the knob's click went down, while it is down
+    clicked: Option<Instant>,
 }
 
 impl Devices {
-    pub fn create(channel: &proto::InputChannel, knob: Knob) -> Result<Self, String> {
+    pub fn create(channel: &proto::InputChannel, dial: Dial) -> Result<Self, String> {
         let area = channel.touch_screen_config.as_ref().and_then(|c| Some((c.width?, c.height?)));
         let touchscreen = area.filter(|&(w, h)| w > 0 && h > 0).map(|(w, h)| Touchscreen::create(w, h)).transpose()?;
         let codes = &channel.supported_keycodes;
-        let turned = codes.contains(&ROTARY).then(|| knob.keys()).into_iter().flatten();
-        let wheel = (knob == Knob::Scroll && codes.contains(&ROTARY)).then(create_wheel).transpose()?;
-        let keys: Vec<u16> = codes.iter().filter_map(|&code| linux_key(code)).chain(turned).collect();
+        let turns = codes.contains(&ROTARY);
+        let turned = dial.modes.iter().filter(|_| turns).flat_map(|mode| mode.keys());
+        let wheel = (turns && dial.modes.contains(&Knob::Scroll)).then(create_wheel).transpose()?;
+        let keys: Vec<u16> = codes.iter().filter_map(|&code| dial.key(code)).chain(turned).collect();
         let keys = (!keys.is_empty())
             .then(|| {
                 Device::create(KEYS_NAME, |file| {
@@ -365,27 +506,51 @@ impl Devices {
                 })
             })
             .transpose()?;
-        Ok(Self { touchscreen, keys, wheel, knob })
+        Ok(Self { touchscreen, keys, wheel, dial, clicked: None })
     }
 
-    pub fn deliver(&mut self, event: &proto::InputEvent) -> Result<(), String> {
+    /// what a button is to the keys device. the knob's click, where the
+    /// knob has a say in it, counts once it is let go, by how long it was down
+    fn button(&mut self, code: u32, pressed: bool) -> Vec<Event> {
+        match (code, pressed) {
+            (CLICK, true) if self.dial.owns_click() => {
+                self.clicked = Some(Instant::now());
+                vec![]
+            }
+            (CLICK, false) if self.dial.owns_click() => {
+                let long = self.clicked.take().is_some_and(|since| since.elapsed() >= LONG_CLICK);
+                self.dial.click(long)
+            }
+            (BACK, _) => self.dial.back(pressed),
+            _ => self.dial.key(code).map(|key| report(key, pressed as i32).to_vec()).unwrap_or_default(),
+        }
+    }
+
+    /// pass on what the headunit sent. returns a line for the session when
+    /// the knob has gone to another of its uses, so it can say so on screen
+    pub fn deliver(&mut self, event: &proto::InputEvent) -> Result<Option<String>, String> {
         if let (Some(screen), Some(touch)) = (self.touchscreen.as_mut(), &event.touch_event) {
             screen.touch(touch)?;
         }
+        let before = self.dial.mode();
         for button in event.button_event.iter().flat_map(|b| &b.button_events) {
-            if let (Some(keys), Some(key)) = (self.keys.as_mut(), button.scan_code.and_then(linux_key)) {
-                keys.emit(&[(EV_KEY, key, button.is_pressed.unwrap_or(false) as i32), (EV_SYN, SYN_REPORT, 0)])?;
+            let Some(code) = button.scan_code else { continue };
+            let events = self.button(code, button.is_pressed.unwrap_or(false));
+            if let Some(keys) = self.keys.as_mut() {
+                keys.emit(&events)?;
             }
         }
-        // the knob's turn goes to the wheel when there is one, or is typed
-        let Some(turned) = self.wheel.as_mut().or(self.keys.as_mut()) else { return Ok(()) };
+        // the knob's turn goes to the wheel when it is one, or is typed
         let turns = event.relative_event.iter().flat_map(|r| &r.relative_events);
         for delta in turns.filter(|turn| turn.scan_code == Some(ROTARY)).filter_map(|turn| turn.delta) {
             for _ in 0..delta.unsigned_abs().min(MAX_DETENTS) {
-                turned.emit(&self.knob.detent(delta > 0))?;
+                let wheel = if self.dial.mode() == Knob::Scroll { self.wheel.as_mut() } else { None };
+                let Some(turned) = wheel.or(self.keys.as_mut()) else { break };
+                turned.emit(&self.dial.turn(delta > 0))?;
             }
         }
-        Ok(())
+        let now = self.dial.mode();
+        Ok((now != before).then(|| format!("knob {now}")))
     }
 }
 
@@ -421,6 +586,53 @@ mod tests {
         assert_eq!(knob.detent(true), notch(-1), "clockwise is the wheel rolled toward the hand");
         assert_eq!(knob.detent(false), notch(1));
         assert_eq!(knob.keys().count(), 0, "a wheel types nothing");
+        assert_eq!(knob.to_string(), "scroll", "named to the session as it is on the command line");
+    }
+
+    fn dial(modes: &str, back: Back) -> Dial {
+        Dial::new(modes.split(',').map(|mode| mode.parse().unwrap()).collect(), back)
+    }
+
+    #[test]
+    fn a_long_click_takes_the_knob_to_its_next_use_and_a_short_one_is_enter() {
+        let mut dial = dial("focus,scroll,type", Back::Back);
+        assert_eq!(dial.click(false), tap(KEY_ENTER));
+        assert!(dial.mode() == Knob::Focus);
+        assert_eq!(dial.click(true), vec![], "a long click types nothing");
+        assert!(dial.mode() == Knob::Scroll);
+        dial.click(true);
+        dial.click(true);
+        assert!(dial.mode() == Knob::Focus, "and after the last comes the first");
+        let mut only = super::tests::dial("arrows", Back::Back);
+        assert!(!only.owns_click(), "a knob with one use leaves its click to the application, held or not");
+        only.click(true);
+        assert!(only.mode() == Knob::Arrows);
+    }
+
+    #[test]
+    fn the_knob_types_a_letter_at_a_time_into_whatever_takes_text() {
+        let mut dial = dial("type", Back::Back);
+        let (a, b, last) = (TYPED[0], TYPED[1], TYPED[TYPED.len() - 1]);
+        assert_eq!(dial.turn(true), tap(a), "the first detent writes the first letter");
+        assert_eq!(dial.turn(true), [tap(KEY_BACKSPACE), tap(b)].concat(), "the next writes another in its place");
+        assert_eq!(dial.turn(false), [tap(KEY_BACKSPACE), tap(a)].concat());
+        assert_eq!(dial.click(false), vec![], "a click keeps the letter");
+        assert_eq!(dial.turn(false), tap(last), "and the next letter starts from either end");
+        dial.click(false);
+        assert_eq!(dial.click(false), tap(KEY_ENTER), "a click with no letter to keep is enter");
+    }
+
+    #[test]
+    fn back_takes_a_letter_away_while_typing_and_is_escape_where_asked() {
+        let mut typing = dial("type", Back::Escape);
+        typing.turn(true);
+        assert_eq!(typing.back(true), tap(KEY_BACKSPACE));
+        assert_eq!(typing.back(false), vec![], "the key went down and up already");
+        assert_eq!(typing.turn(true), tap(TYPED[0]), "the letter that went is not written over");
+        let report = |key, value| vec![(EV_KEY, key, value), (EV_SYN, SYN_REPORT, 0)];
+        assert_eq!(dial("focus", Back::Escape).back(true), report(KEY_ESC, 1), "what closes a menu on a desk");
+        assert_eq!(dial("focus", Back::Back).back(false), report(linux_key(BACK).unwrap(), 0));
+        assert!("escape".parse::<Back>().is_ok() && "back".parse::<Back>().is_ok() && "home".parse::<Back>().is_err());
     }
 
     #[test]

@@ -5,13 +5,12 @@ mod audio;
 mod command;
 mod gadget;
 mod nmea;
-mod sensors;
 mod tls;
 mod uinput;
 mod video;
 mod x509;
 
-use aap::{text, Event, Options, Session, VideoMode};
+use aap::{sensors, text, Event, Options, Session, VideoMode};
 use behead_link::send_when_ready;
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -25,7 +24,7 @@ use std::time::Duration;
 const USAGE: &str =
     "usage: behead (--cert FILE --key FILE | --cert-dir DIR)... --video-cmd CMD [--audio-cmd CMD] [--mic-cmd CMD]
               [--audio-delay MS] [--usb UDC | --listen ADDR] [--uinput] [--knob KEYS]
-              [--nmea-socket PATH] [--max-height LINES]
+              [--back KEY] [--nmea-socket PATH] [--max-height LINES]
        behead teardown
 
   --cert FILE      phone certificate, pem
@@ -50,7 +49,12 @@ const USAGE: &str =
   --knob KEYS      what a turn of the car's rotary knob is with --uinput:
                    'focus' for tab and shift+tab (default), 'arrows' for
                    down and up, 'scroll' for a mouse's wheel, which zooms
-                   a map
+                   a map, 'type' for a letter at a time into whatever
+                   takes text. several with , between: a long click of
+                   the knob steps from one to the next
+  --back KEY       what the car's back button is with --uinput: 'back'
+                   (default), or 'escape', which closes a menu or a dialog
+                   in applications made for a desk
   --nmea-socket PATH  offer the car's location as nmea sentences on a unix
                    socket, for a location service such as geoclue
   --max-height LINES  when the headunit asks for a taller picture than this,
@@ -85,7 +89,8 @@ struct Config {
     audio_delay: Duration,
     mic_cmd: Option<String>,
     uinput: bool,
-    knob: uinput::Knob,
+    knob: Vec<uinput::Knob>,
+    back: uinput::Back,
     nmea_socket: Option<PathBuf>,
     max_height: Option<u32>,
 }
@@ -114,7 +119,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, String> 
     let (mut transport, mut credentials, mut cert, mut video_cmd, mut uinput) =
         (Transport::Tcp(DEFAULT_LISTEN.into()), Vec::new(), None, None, false);
     let (mut audio_cmd, mut mic_cmd, mut nmea_socket, mut audio_delay) = (None, None, None, Duration::ZERO);
-    let (mut knob, mut max_height) = (uinput::Knob::default(), None);
+    let (mut knob, mut back, mut max_height) = (vec![uinput::Knob::default()], uinput::Back::default(), None);
     while let Some(flag) = args.next() {
         if cert.is_some() && flag != "--key" {
             return Err(UNPAIRED_CERT.into());
@@ -144,7 +149,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, String> 
                 audio_delay = Duration::from_millis(ms)
             }
             "--knob" if value.is_empty() => {}
-            "--knob" => knob = value.parse()?,
+            "--knob" => knob = value.split(',').map(str::parse).collect::<Result<_, _>>()?,
+            "--back" if value.is_empty() => {}
+            "--back" => back = value.parse()?,
             "--nmea-socket" => nmea_socket = Some(PathBuf::from(value)),
             "--max-height" if value.is_empty() => {}
             "--max-height" => {
@@ -169,6 +176,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, String> 
         mic_cmd,
         uinput,
         knob,
+        back,
         nmea_socket,
         max_height,
     })
@@ -206,22 +214,27 @@ fn credential_files(credentials: &[Credential]) -> Result<Vec<(PathBuf, PathBuf)
 /// kernel input devices matching the headunit's input services: the keys of
 /// all of them, and the first touchscreen. a failure is logged rather than
 /// fatal, since input still reaches stdout
-fn create_input_devices(info: &aap::proto::ServiceDiscoveryResponse, knob: uinput::Knob) -> Option<uinput::Devices> {
+fn create_input_devices(info: &aap::proto::ServiceDiscoveryResponse, dial: uinput::Dial) -> Option<uinput::Devices> {
     let inputs: Vec<_> = info.channels.iter().filter_map(|channel| channel.input_channel.as_ref()).collect();
     let merged = aap::proto::InputChannel {
         supported_keycodes: inputs.iter().flat_map(|input| input.supported_keycodes.clone()).collect(),
         touch_screen_config: inputs.iter().find_map(|input| input.touch_screen_config.clone()),
         touch_pad_config: None,
     };
-    (!inputs.is_empty()).then(|| uinput::Devices::create(&merged, knob).inspect_err(|e| eprintln!("{e}")).ok())?
+    (!inputs.is_empty()).then(|| uinput::Devices::create(&merged, dial).inspect_err(|e| eprintln!("{e}")).ok())?
 }
 
 /// print input to stdout, inject it with --uinput, and hand it to the video command
 fn deliver_input(host: &mut Host, event: &aap::proto::InputEvent) {
-    if let Some(Err(e)) = host.input_devices.as_mut().map(|devices| devices.deliver(event)) {
-        eprintln!("{e}");
-    }
-    deliver_lines(host, text::input_lines(event));
+    let knob = match host.input_devices.as_mut().map(|devices| devices.deliver(event)) {
+        Some(Err(e)) => {
+            eprintln!("{e}");
+            None
+        }
+        Some(Ok(line)) => line,
+        None => None,
+    };
+    deliver_lines(host, text::input_lines(event).into_iter().chain(knob).collect());
 }
 
 /// hand one line to the video command, if it is running
@@ -277,7 +290,8 @@ fn handle(shared: &Shared, host: &mut Host, config: &Config, video: &mut Option<
             eprintln!("headunit offers {} channels", info.channels.len());
             text::describe_inputs(&info).iter().for_each(|line| eprintln!("{line}"));
             if config.uinput {
-                host.input_devices = create_input_devices(&info, config.knob);
+                let dial = uinput::Dial::new(config.knob.clone(), config.back);
+                host.input_devices = create_input_devices(&info, dial);
             }
         }
         Event::VideoStarted(mode) => {

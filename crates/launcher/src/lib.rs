@@ -1,16 +1,19 @@
 //! a launcher for the car's screen: a home screen of tiles, a music player
-//! for the files on a card, and the demo as an input test. everything works
+//! for the files on a card, a map of where the car is from files beside
+//! them, and the demo as an input test. everything works
 //! by touch, and by a knob with a back button where the car has no
 //! touchscreen. it draws on a `Surface` and takes the server's input lines,
 //! so the behead-launcher program and the esp32 firmware show the same.
 
 mod decode;
 mod library;
+mod map;
 mod opus;
 mod player;
 
 use behead_demo::{parse_point, plain, Surface, ADVANCE, GLYPH_HEIGHT, ROTARY};
 use library::Entry;
+pub use map::{maps_in, Map, Source as MapSource};
 pub use player::{Now, Player, Source};
 use std::hash::{DefaultHasher, Hash, Hasher};
 
@@ -44,12 +47,21 @@ const SLIDE_STEPS_PER_SECOND: u64 = 2;
 const SLIDE_REST: u64 = 4;
 const TITLE: &str = "BEHEAD";
 const MUSIC: &str = "MUSIC";
-const TILES: [(&str, Screen); 2] = [(MUSIC, Screen::Music), ("INPUTS", Screen::Demo)];
+const TILES: [(&str, Screen); 3] = [(MUSIC, Screen::Music), ("MAP", Screen::Map), ("INPUTS", Screen::Demo)];
+/// the home screen has room for this many tiles across and down
+const TILE_GRID: (u32, u32) = (3, 2);
+/// the car on the map: a dot this many units across, with a rim
+const CAR: u32 = 4;
+const CAR_RIM: [u8; 3] = [240, 240, 240];
+const NO_MAP: &str = "NO MAP OF HERE";
 // android's key codes, as the car sends them
 const KEY_HOME: u32 = 3;
 const KEY_BACK: u32 = 4;
-const KEYS_BEFORE: [u32; 2] = [19, 21];
-const KEYS_AFTER: [u32; 2] = [20, 22];
+/// a car's four arrows, up, down, left and right, and which way each goes:
+/// to the right, and down
+const ARROWS: [(u32, (i64, i64)); 4] = [(19, (0, -1)), (20, (0, 1)), (21, (-1, 0)), (22, (1, 0))];
+/// an arrow moves the map this part of the screen
+const PAN_PART: u32 = 4;
 const KEYS_ENTER: [u32; 2] = [23, 66];
 const KEY_PLAY_PAUSE: u32 = 85;
 const KEY_NEXT: u32 = 87;
@@ -61,6 +73,7 @@ const KEY_PAUSE: u32 = 127;
 enum Screen {
     Home,
     Music,
+    Map,
     Demo,
 }
 
@@ -92,6 +105,10 @@ enum Action {
     /// the track after the one playing, or with -1 the one before
     Step(i64),
     Toggle,
+    /// the map a step closer, or with -1 a step wider
+    Zoom(i64),
+    /// the map back around the car, to stay with it
+    Follow,
 }
 
 struct Button {
@@ -113,6 +130,15 @@ pub struct App {
     /// the line of its listing the knob is on, and the first one shown
     cursor: usize,
     top: usize,
+    maps: Vec<Map>,
+    /// where the car last said it is, and the place in the middle of the
+    /// map, which is the car's for as long as the map follows it
+    car: Option<(u32, u32)>,
+    centre: (u32, u32),
+    following: bool,
+    zoom: u8,
+    /// where a finger moving the map was last
+    finger: Option<(u32, u32)>,
 }
 
 /// as much of a text as fits a width, in letters the font has
@@ -172,7 +198,31 @@ fn panel(surface: &mut impl Surface, area: Area, colour: [u8; 3]) {
 impl App {
     pub fn new(player: Player, width: u32, height: u32) -> Self {
         let (size, demo) = ((width, height), behead_demo::State::default());
-        Self { player, size, screen: Screen::Home, tile: 0, demo, folder: String::new(), cursor: 0, top: 0 }
+        Self {
+            player,
+            size,
+            screen: Screen::Home,
+            tile: 0,
+            demo,
+            folder: String::new(),
+            cursor: 0,
+            top: 0,
+            maps: vec![],
+            car: None,
+            centre: (0, 0),
+            following: true,
+            zoom: map::ZOOM_START,
+            finger: None,
+        }
+    }
+
+    /// another map to draw from. until the car says where it is, the map
+    /// screen shows the middle of the first
+    pub fn add_map(&mut self, map: Map) {
+        if self.maps.is_empty() && self.car.is_none() {
+            self.centre = map.middle();
+        }
+        self.maps.push(map);
     }
 
     /// the car's screen has this many pixels from now on
@@ -190,8 +240,9 @@ impl App {
         // the demo's bar moves in every picture, and a long name a few
         // times a second
         let moving = ((self.screen == Screen::Demo).then_some(frame), self.slides(slide_step(fps, frame)));
+        let mapped = (self.screen == Screen::Map).then_some((self.centre, self.zoom, self.car, self.maps.len()));
         let mut hasher = DefaultHasher::new();
-        (self.size, self.screen, self.tile, listed, now, moving).hash(&mut hasher);
+        (self.size, self.screen, self.tile, listed, now, moving, mapped).hash(&mut hasher);
         hasher.finish()
     }
 
@@ -218,13 +269,16 @@ impl App {
         (self.list().height / (ROW * self.scale())).max(1) as usize
     }
 
+    /// the home screen's tiles, in rows from the top, each row from the left
     fn tiles(&self) -> Vec<Button> {
-        let (scale, count) = (self.scale(), TILES.len() as u32);
+        let (scale, (columns, rows)) = (self.scale(), TILE_GRID);
         let (margin, top) = (MARGIN * scale, BAR * scale);
-        let width = self.size.0.saturating_sub(margin * (count + 1)) / count;
-        let height = self.size.1.saturating_sub(top + 2 * margin);
+        let width = self.size.0.saturating_sub(margin * (columns + 1)) / columns;
+        let height = self.size.1.saturating_sub(top + margin * (rows + 1)) / rows;
         let tile = |(index, &(label, screen)): (usize, &(&'static str, Screen))| {
-            let area = Area { x: margin + index as u32 * (width + margin), y: top + margin, width, height };
+            let (column, row) = (index as u32 % columns, index as u32 / columns);
+            let (x, y) = (margin + column * (width + margin), top + margin + row * (height + margin));
+            let area = Area { x, y, width, height };
             Button { area, label, action: Action::Open(screen) }
         };
         TILES.iter().enumerate().map(tile).collect()
@@ -255,6 +309,22 @@ impl App {
         match self.screen {
             Screen::Home => self.tiles(),
             Screen::Music => self.music_buttons(),
+            // down the right of the map, where a driver's hand is nearest
+            Screen::Map => {
+                let column = [
+                    ("BACK", Action::Leave),
+                    ("+", Action::Zoom(1)),
+                    ("-", Action::Zoom(-1)),
+                    ("HERE", Action::Follow),
+                ];
+                let high = self.size.1 / column.len() as u32;
+                let place = |(index, (label, action))| {
+                    let area =
+                        Area { x: self.size.0.saturating_sub(wide), y: index as u32 * high, width: wide, height: high };
+                    Button { area, label, action }
+                };
+                column.into_iter().enumerate().map(place).collect()
+            }
             // in the corner the demo writes nothing in
             Screen::Demo => {
                 let area = Area { x: self.size.0.saturating_sub(wide), y: 0, width: wide, height: bar };
@@ -319,6 +389,48 @@ impl App {
             Action::Row(row) => self.choose(self.top + row),
             Action::Step(by) => self.player.step(by),
             Action::Toggle => self.player.pause(|paused| !paused),
+            // a step closer is half as many of the world's units to a pixel
+            Action::Zoom(by) => self.zoom = (self.zoom as i64 - by).clamp(map::ZOOM.0.into(), map::ZOOM.1.into()) as u8,
+            Action::Follow => {
+                self.following = true;
+                self.centre = self.car.unwrap_or(self.centre);
+            }
+        }
+    }
+
+    /// the car said where it is, in degrees
+    fn located(&mut self, latitude: f64, longitude: f64) {
+        self.car = Some(map::world(latitude, longitude));
+        if self.following {
+            self.centre = self.car.unwrap_or(self.centre);
+        }
+    }
+
+    /// the map's middle so many pixels to the right and down of where it
+    /// was, which is the map no longer with the car
+    fn pan(&mut self, right: i64, down: i64) {
+        let moved = |centre: u32, by: i64| (centre as i64 + (by << self.zoom)).clamp(0, u32::MAX.into()) as u32;
+        self.centre = (moved(self.centre.0, right), moved(self.centre.1, down));
+        self.following = false;
+    }
+
+    /// a finger on the map moved: the map goes with it
+    fn dragged(&mut self, x: u32, y: u32) {
+        if let Some(from) = self.finger.replace((x, y)) {
+            self.pan(from.0 as i64 - x as i64, from.1 as i64 - y as i64);
+        }
+    }
+
+    /// one of a car's four arrows: to the tile that way, along the list, or
+    /// the map a part of the screen that way. the knob has the map's size
+    fn arrow(&mut self, (right, down): (i64, i64)) {
+        match self.screen {
+            Screen::Home => {
+                let to = self.tile as i64 + right + down * TILE_GRID.0 as i64;
+                self.tile = if (0..TILES.len() as i64).contains(&to) { to as usize } else { self.tile };
+            }
+            Screen::Map => self.pan(right * (self.size.0 / PAN_PART) as i64, down * (self.size.1 / PAN_PART) as i64),
+            _ => self.turn(right + down),
         }
     }
 
@@ -327,7 +439,7 @@ impl App {
         library::entries(&self.player.tracks(), &self.folder).len()
     }
 
-    /// the knob turned, or an arrow key stood in for it
+    /// the knob turned, or an arrow went along a list
     fn turn(&mut self, by: i64) {
         match self.screen {
             Screen::Home => self.tile = self.tile.saturating_add_signed(by as isize).min(TILES.len() - 1),
@@ -335,6 +447,7 @@ impl App {
                 self.cursor = self.cursor.saturating_add_signed(by as isize).min(self.entries().saturating_sub(1));
                 self.reveal();
             }
+            Screen::Map => self.act(Action::Zoom(by)),
             Screen::Demo => {}
         }
     }
@@ -348,11 +461,13 @@ impl App {
             KEY_PAUSE => self.player.pause(|_| true),
             KEY_NEXT => self.act(Action::Step(1)),
             KEY_PREVIOUS => self.act(Action::Step(-1)),
-            code if KEYS_BEFORE.contains(&code) => self.turn(-1),
-            code if KEYS_AFTER.contains(&code) => self.turn(1),
+            code if ARROWS.iter().any(|(arrow, _)| *arrow == code) => {
+                ARROWS.iter().filter(|(arrow, _)| *arrow == code).for_each(|(_, way)| self.arrow(*way));
+            }
             code if KEYS_ENTER.contains(&code) => match self.screen {
                 Screen::Home => self.act(Action::Open(TILES[self.tile].1)),
                 Screen::Music => self.choose(self.cursor),
+                Screen::Map => self.act(Action::Follow),
                 Screen::Demo => {}
             },
             _ => {}
@@ -365,6 +480,8 @@ impl App {
             self.act(button.action);
         } else if self.screen == Screen::Music && list.contains(x, y) {
             self.act(Action::Row(((y - list.y) / row) as usize));
+        } else if self.screen == Screen::Map {
+            self.finger = Some((x, y));
         }
     }
 
@@ -378,6 +495,15 @@ impl App {
             ["touch", "down", index, points @ ..] => {
                 let point = index.parse::<usize>().ok().and_then(|index| parse_point(points.get(index)?));
                 point.into_iter().for_each(|(_, (x, y))| self.touch(x, y));
+            }
+            ["touch", "move", _, point, ..] if self.screen == Screen::Map => {
+                parse_point(point).into_iter().for_each(|(_, (x, y))| self.dragged(x, y));
+            }
+            ["touch", "up", ..] => self.finger = None,
+            ["location", latitude, longitude, ..] => {
+                if let (Ok(latitude), Ok(longitude)) = (latitude.parse(), longitude.parse()) {
+                    self.located(latitude, longitude);
+                }
             }
             ["button", code, "down"] => code.parse().into_iter().for_each(|code| self.key(code)),
             ["relative", code, by] if code.parse() == Ok(ROTARY) => by.parse().into_iter().for_each(|by| self.turn(by)),
@@ -456,6 +582,22 @@ impl App {
         self.render_footer(surface, &tracks, title);
     }
 
+    /// the map around its middle, from every map that has some of it, and
+    /// the car on it where it is in the picture
+    fn render_map(&self, surface: &mut impl Surface) {
+        let scale = self.scale();
+        let view = map::View { centre: self.centre, zoom: self.zoom, size: self.size, scale };
+        if !map::draw(&self.maps, surface, &view) {
+            write(surface, Area { x: 0, y: 0, width: self.size.0, height: self.size.1 }, scale, true, TEXT, NO_MAP);
+        }
+        if let Some(car) = self.car {
+            let (x, y) = view.pixel(car);
+            let (rim, dot) = ((CAR * scale) as i64, ((CAR - 1) * scale) as i64);
+            surface.rect(x - rim / 2, y - rim / 2, rim as u32, rim as u32, CAR_RIM);
+            surface.rect(x - dot / 2, y - dot / 2, dot as u32, dot as u32, FOCUS);
+        }
+    }
+
     /// draw one frame of the screen that shows
     pub fn render(&self, surface: &mut impl Surface, fps: u32, frame: u64) {
         let scale = self.scale();
@@ -466,6 +608,7 @@ impl App {
                 write(surface, header, scale, true, TEXT, TITLE);
             }
             Screen::Music => self.render_music(surface, slide_step(fps, frame)),
+            Screen::Map => self.render_map(surface),
             Screen::Demo => behead_demo::render(surface, &self.demo, fps, frame),
         }
         let home = self.screen == Screen::Home;
@@ -535,6 +678,7 @@ mod tests {
     fn a_touch_opens_a_tile_a_folder_and_a_track() {
         let (mut app, player, _) = launcher("touch");
         assert_eq!(pixel(&app, 40, 240), FOCUS, "the knob starts on the music tile");
+        assert_eq!(pixel(&app, 40, 400), BACKGROUND, "the tiles are in two rows of three, the second still empty");
         tap(&mut app, MUSIC_TILE);
         assert_eq!(app.screen, Screen::Music);
         tap(&mut app, FIRST_LINE);
@@ -570,7 +714,21 @@ mod tests {
     fn the_knob_and_keys_do_the_same() {
         let (mut app, player, _) = launcher("knob");
         feed(&mut app, &["relative 65536 1", "button 23 down", "button 23 up"]);
-        assert_eq!(app.screen, Screen::Demo);
+        assert_eq!(app.screen, Screen::Map);
+        feed(&mut app, &["location 36.0 -86.0 - - - -", "relative 65536 1", "relative 65536 -3"]);
+        assert_eq!((app.car, app.zoom), (Some(map::world(36.0, -86.0)), map::ZOOM_START + 2), "a turn back is wider");
+        feed(&mut app, &["touch down 0 0:100,100", "touch move 0 0:90,100", "touch up 0 0:90,100"]);
+        assert_eq!(app.centre.0, map::world(36.0, -86.0).0 + (10 << app.zoom), "a finger takes the map with it");
+        feed(&mut app, &["button 23 down"]);
+        assert_eq!(Some(app.centre), app.car, "and a click has it back around the car");
+        let (car, zoom) = (map::world(36.0, -86.0), app.zoom);
+        feed(&mut app, &["button 22 down", "button 19 down"]);
+        let moved = (car.0 + ((SIZE.0 / PAN_PART) << zoom), car.1 - ((SIZE.1 / PAN_PART) << zoom));
+        assert_eq!((app.centre, app.zoom), (moved, zoom), "a car's arrows move the map and leave its size alone");
+        feed(&mut app, &["button 3 down", "button 20 down"]);
+        assert_eq!(app.tile, 1, "no tile is under the map's yet, so down goes nowhere");
+        feed(&mut app, &["button 22 down", "button 23 down"]);
+        assert_eq!(app.screen, Screen::Demo, "and right goes to the tile beside it");
         feed(&mut app, &["button 3 down", "relative 65536 -5", "button 66 down"]);
         assert_eq!(app.screen, Screen::Music);
         feed(&mut app, &["relative 65536 1", "button 23 down", "button 20 down"]);

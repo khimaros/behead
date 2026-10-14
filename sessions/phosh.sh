@@ -31,6 +31,10 @@ POINTER_THEME=behead-hidden
 POINTER_NAMES=/usr/share/icons/Adwaita/cursors
 CLEAR_CURSOR='Xcur\020\0\0\0\0\0\001\0\001\0\0\0\002\0\375\377\001\0\0\0\034\0\0\0'
 CLEAR_CURSOR="$CLEAR_CURSOR"'\044\0\0\0\002\0\375\377\001\0\0\0\001\0\0\0\001\0\0\0\001\0\0\0\0\0\0\0\0\0\0\0\001\0\0\0\0\0\0\0'
+# where the shell takes a note to show, and how long the one about the knob stays
+NOTES=org.freedesktop.Notifications
+NOTES_PATH=/org/freedesktop/Notifications
+KNOB_NOTE_MS=3000
 LOCATION_APPLICATIONS="org.gnome.Maps app.comaps.comaps"
 # what an image brings beside its packages (tools/fetch-flatpak.sh,
 # tools/fetch-maps.sh and tools/fetch-comaps.py): applications as a flatpak
@@ -95,11 +99,33 @@ scale = 1
 EOF
 
 # follow the car's night mode with the style applications ask for, when asked to
-sensor() {
-    [ "$1" = night ] && [ "$scheme" = car ] || return 0
-    case $2 in 1) style=$DARK theme=$DARK_THEME ;; *) style=$LIGHT theme=$LIGHT_THEME ;; esac
+follow_car() {
+    [ "$scheme" = car ] || return 0
+    case $1 in 1) style=$DARK theme=$DARK_THEME ;; *) style=$LIGHT theme=$LIGHT_THEME ;; esac
     gsettings set org.gnome.desktop.interface color-scheme "$style"
     gsettings set org.gnome.desktop.interface gtk-theme "$theme"
+}
+
+# say on the screen what the knob does now: a long click took it to another
+# of its uses, and nothing else shows which. one note, written over
+say_knob() {
+    case $1 in
+        focus) use="a turn goes from one thing to the next" ;;
+        arrows) use="a turn goes up and down a list" ;;
+        scroll) use="a turn makes the map larger or smaller" ;;
+        type) use="a turn writes a letter, a click keeps it" ;;
+        *) return 0 ;;
+    esac
+    note=$(gdbus call --session --dest "$NOTES" --object-path "$NOTES_PATH" --method "$NOTES.Notify" \
+        behead "${note:-0}" "" "knob: $1" "$use" "[]" "{}" "$KNOB_NOTE_MS" | tr -dc 0-9)
+}
+
+# what the server tells the session, a line at a time
+told() {
+    case $1 in
+        night) follow_car "$2" ;;
+        knob) say_knob "$2" ;;
+    esac
 }
 
 # the sandboxed applications that may know where the car is unasked. the
@@ -219,5 +245,5 @@ wait_for_display
 # screen, and there is none here, so it is started beside the shell, which
 # shows it (screen-keyboard-enabled above) when something wants text
 if command -v "$KEYBOARD" > /dev/null; then run "$KEYBOARD"; fi
-on_line sensor
+on_line told
 capture HEADLESS-1 "$width" "$height" "$fps"

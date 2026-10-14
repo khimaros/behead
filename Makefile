@@ -94,10 +94,22 @@ ESP32_CACHED := $(CERT_CACHE)/carservice
 # the usb port the firmware is the phone on: high, the chip's high speed
 # port, or full, its full speed controller on the pins of its debug port
 ESP32_PORT ?= high
-ESP32_SDKCONFIG := sdkconfig.defaults$(if $(filter full,$(ESP32_PORT)),;sdkconfig.full-speed)
-ESP32_CARGO = cd $(ESP32_DIR) && ESP_IDF_SDKCONFIG_DEFAULTS="$(ESP32_SDKCONFIG)" cargo
+# the chip's revision: v1 for those before v3, or v3. a build runs on one or
+# the other, and v3 takes a later esp-idf, the first to know it, with a
+# compiler of its own: so each is built in a directory of its own
+ESP32_CHIP ?= v1
+ESP32_V3_IDF := v5.4.4
+# by their whole paths: the build looks for them from its own directory,
+# which is not the firmware's once CARGO_TARGET_DIR names it
+ESP32_SETTINGS := defaults $(if $(filter full,$(ESP32_PORT)),full-speed) $(if $(filter v3,$(ESP32_CHIP)),rev3)
+ESP32_SDKCONFIG := $(subst $(eval) ,;,$(foreach name,$(ESP32_SETTINGS),$(abspath $(ESP32_DIR)/sdkconfig.$(name))))
 # from esp32, where the firmware's tools are
-ESP32_ELF := target/riscv32imafc-esp-espidf/release/behead-esp32
+ESP32_TARGET := target$(if $(filter v3,$(ESP32_CHIP)),/v3)
+ESP32_CARGO = cd $(ESP32_DIR) && $(if $(filter v3,$(ESP32_CHIP)),ESP_IDF_VERSION=$(ESP32_V3_IDF)) \
+	CARGO_TARGET_DIR=$(ESP32_TARGET) ESP_IDF_SDKCONFIG_DEFAULTS="$(ESP32_SDKCONFIG)" cargo
+ESP32_ELF := $(ESP32_TARGET)/riscv32imafc-esp-espidf/release/behead-esp32
+ESP32_MAPS ?=
+ESP32_BUILT_IN_MAPS := $(ESP32_DIR)/maps
 
 .PHONY: build build-rpi build-esp32 test test-e2e test-e2e-rpi vm test-vm demo-vm certs-rpi sessions-rpi image-rpi \
 	flash-rpi release-rpi ota-rpi deploy-rpi certs-esp32 flash-esp32 monitor-esp32 test-device headunit precommit clean
@@ -117,8 +129,13 @@ certs-esp32:
 	openssl x509 -in $(ESP32_PHONE).crt -noout -subject -issuer -enddate
 
 # the firmware has its own toolchain and target (see esp32/README.md). the
-# first build fetches esp-idf, several gigabytes, into esp32/.embuild
+# first build fetches esp-idf, several gigabytes, into esp32/.embuild.
+# ESP32_MAPS are maps from tools/fetch-map.py to build in, for a board with
+# no card or none with maps on it; without them the firmware has none
 build-esp32: certs-esp32
+	rm -rf $(ESP32_BUILT_IN_MAPS)
+	mkdir -p $(ESP32_BUILT_IN_MAPS)
+	$(if $(ESP32_MAPS),cp $(ESP32_MAPS) $(ESP32_BUILT_IN_MAPS))
 	$(ESP32_CARGO) build --release
 
 # write the firmware to a board on usb

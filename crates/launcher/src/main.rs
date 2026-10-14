@@ -16,9 +16,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-const USAGE: &str = "usage: behead-launcher --width N --height N --fps N --music DIR [--audio PIPE]
+const USAGE: &str = "usage: behead-launcher --width N --height N --fps N --music DIR [--maps DIR] [--audio PIPE]
 
   --music DIR   where the music is: mp3, flac, opus and wav files, in folders or not
+  --maps DIR    where the maps are: the .bmap files tools/fetch-map.py makes
   --audio PIPE  a named pipe to write what plays to, as signed 16 bit little
                 endian stereo pcm at 48000 hz, at the speed it is heard";
 /// the format written to --audio, which is what cars take as media audio
@@ -32,11 +33,12 @@ struct Config {
     height: u32,
     fps: u32,
     music: PathBuf,
+    maps: Option<PathBuf>,
     audio: Option<PathBuf>,
 }
 
 fn parse_args(mut args: impl Iterator<Item = String>) -> Option<Config> {
-    let (mut width, mut height, mut fps, mut music, mut audio) = (None, None, None, None, None);
+    let (mut width, mut height, mut fps, mut music, mut maps, mut audio) = (None, None, None, None, None, None);
     while let Some(flag) = args.next() {
         let value = args.next()?;
         match flag.as_str() {
@@ -44,11 +46,12 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Option<Config> {
             "--height" => height = value.parse().ok(),
             "--fps" => fps = value.parse().ok(),
             "--music" => music = Some(PathBuf::from(value)),
+            "--maps" => maps = Some(PathBuf::from(value)),
             "--audio" => audio = Some(PathBuf::from(value)),
             _ => return None,
         }
     }
-    let config = Config { width: width?, height: height?, fps: fps?, music: music?, audio };
+    let config = Config { width: width?, height: height?, fps: fps?, music: music?, maps, audio };
     (config.width >= MIN_SIZE.0 && config.height >= MIN_SIZE.1 && config.fps > 0).then_some(config)
 }
 
@@ -74,6 +77,9 @@ fn play(mut source: Source, path: PathBuf) {
 fn run(config: Config) {
     let player = Player::default();
     let app = Arc::new(Mutex::new(App::new(player.clone(), config.width, config.height)));
+    for map in config.maps.iter().flat_map(|maps| behead_launcher::maps_in(maps)) {
+        app.lock().unwrap().add_map(map);
+    }
     let (input, source) = (app.clone(), player.source());
     std::thread::spawn(move || {
         std::io::stdin().lock().lines().map_while(Result::ok).for_each(|line| input.lock().unwrap().apply(&line))

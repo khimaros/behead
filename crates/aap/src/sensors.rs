@@ -2,7 +2,10 @@
 //! documents. values with a known scale come out in plain units, the rest as
 //! the headunit sent them. a value the headunit left out is `-`.
 
-use aap::proto;
+use crate::proto;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
 const DEGREES_E7: f64 = 1e7;
 pub const DEGREES_E6: f64 = 1e6;

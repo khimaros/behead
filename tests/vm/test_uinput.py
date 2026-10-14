@@ -26,6 +26,9 @@ SYN_REPORT = 0
 ABS_MT_SLOT, ABS_MT_POSITION_X, ABS_MT_POSITION_Y, ABS_MT_TRACKING_ID = 0x2F, 0x35, 0x36, 0x39
 KEY_HOMEPAGE, KEY_BACK = 172, 158
 KEY_TAB, KEY_ENTER, KEY_LEFTSHIFT, KEY_UP, KEY_DOWN = 15, 28, 42, 103, 108
+KEY_ESC, KEY_BACKSPACE, KEY_A, KEY_B = 1, 14, 30, 48
+# longer than the server takes a held click for a long one
+LONG_CLICK = 0.8
 TOUCHSCREEN, KEYS = "behead touchscreen", "behead keys"
 DEVICES = pathlib.Path("/proc/bus/input/devices")
 KIOSK = tcp.ROOT / "sessions/kiosk.sh"
@@ -159,6 +162,26 @@ class UinputTest(tcp.SessionTest):
         headunit.turn(fakehu.ROTARY, -2)
         self.assertEqual([pressed for _, pressed in keys.reports(6)],
                          [{KEY_DOWN}, set(), {KEY_UP}, set(), {KEY_UP}, set()])
+
+    def test_a_long_click_changes_what_the_knob_is_and_it_can_type(self):
+        """a car with a knob and no more: held, its click steps the knob
+        from moving the focus to writing, a letter for each detent over the
+        one before, kept by a click. and back is the key that closes things"""
+        self.restart_server(options=["--knob", "focus,type", "--back", "escape"])
+        headunit = self.bound(keycodes=(fakehu.ROTARY, fakehu.DPAD_CENTER, fakehu.BACK))
+        keys = self.open_device(KEYS)
+        headunit.turn(fakehu.ROTARY, 1)
+        headunit.button(fakehu.BACK, True)
+        headunit.button(fakehu.BACK, False)
+        headunit.button(fakehu.DPAD_CENTER, True)
+        time.sleep(LONG_CLICK)
+        headunit.button(fakehu.DPAD_CENTER, False)
+        headunit.turn(fakehu.ROTARY, 2)
+        for pressed in (True, False, True, False):
+            headunit.button(fakehu.DPAD_CENTER, pressed)
+        typed = [key for _, pressed in keys.reports(12) for key in pressed]
+        self.assertEqual(typed, [KEY_TAB, KEY_ESC, KEY_A, KEY_BACKSPACE, KEY_B, KEY_ENTER],
+                         "tab and escape, then a, b in its place, kept by one click, and enter for the next")
 
     def test_a_car_without_a_touchscreen_gets_keys_alone(self):
         headunit = self.connect(touchscreen=None, keycodes=(fakehu.ROTARY, fakehu.DPAD_CENTER))

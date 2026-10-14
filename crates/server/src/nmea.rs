@@ -3,8 +3,8 @@
 //! nmea-socket option). a reader gets the latest fix when it connects, and
 //! every fix after that.
 
-use crate::sensors::{DEGREES_E6, E3, METRES_E2};
 use aap::proto;
+use aap::sensors::{DEGREES_E6, E3, METRES_E2};
 use std::fs::Permissions;
 use std::io::Write;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};

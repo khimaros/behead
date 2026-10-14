@@ -708,7 +708,8 @@ class SessionTest(ServerTest):
                                  "--video-cmd", "true", "--knob", "sideways"],
                                 capture_output=True, timeout=fakehu.TIMEOUT)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn(b"--knob takes focus, arrows or scroll, not sideways", result.stderr)
+        self.assertIn(b"--knob takes focus, arrows, scroll or type, or several with , between, not sideways",
+                      result.stderr)
 
     def test_streams_media_audio(self):
         self.restart_server(options=["--audio-cmd", TONE_CMD])

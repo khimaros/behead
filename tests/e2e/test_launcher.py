@@ -2,6 +2,7 @@
 the way a car's driver would: by touch, by the knob, and by the media keys.
 what plays is told by its pitch, each track being one steady tone"""
 
+import importlib.util
 import math
 import os
 import pathlib
@@ -23,9 +24,10 @@ ENCODE = ("ffmpeg -loglevel error -f rawvideo -pix_fmt rgb24 -s {width}x{height}
 MUSIC_TILE, INPUT_TILE = (200, 240), (600, 240)
 FIRST_LINE, SECOND_LINE = (200, 69), (200, 111)
 PLAY_PAUSE = (600, 456)
-# in the music tile, clear of its name, and the same spot on the music screen
-TILE_SPOT = (60, 400)
-# the tile the knob is on is blue, and the footer of the music screen is not
+# in the music tile, in the first of two rows of three, clear of its name,
+# and the same spot on the music screen
+TILE_SPOT = (60, 230)
+# the tile the knob is on is blue, and the music screen under its two lines is not
 BLUE_OVER_RED = 60
 # the tracks on the card: a wav file beside a folder of an mp3, a flac and
 # an opus file, the first three at a rate other than the car's
@@ -38,6 +40,38 @@ AMPLITUDE = 8000
 SETTLE, LISTEN = 1.0, 0.5
 BYTES_PER_SECOND = tcp.MEDIA_BYTES_PER_SECOND
 WARMUP_FRAMES = 10
+# the map's tile, between the other two, and a car east of nashville, in
+# degrees times ten million. the road through it reaches this many degrees
+# each way, which the map as it opens draws 230 pixels long each way
+MAP_TILE = (400, 240)
+CAR = (360000000, -860000000)
+ROAD_REACH = 0.01
+# on that road beside the car, further along it, and off it
+ROAD_NEAR, ROAD_FAR, OFF_ROAD = (340, 240), (220, 240), (340, 180)
+# the world's map has a shore this many degrees west of the car, which is
+# 276 pixels left of it, and this spot is in the sea beyond
+SHORE = 0.012
+AT_SEA = (40, 100)
+# tools/fetch-map.py, by its path: its name is none python imports
+_tool = importlib.util.spec_from_file_location("fetch_map", tcp.ROOT / "tools/fetch-map.py")
+fetch_map = importlib.util.module_from_spec(_tool)
+_tool.loader.exec_module(fetch_map)
+
+
+def is_road(colour):
+    """a main road is drawn in a yellow that is light"""
+    red, _, blue = colour
+    return red > 150 and red - blue > 50
+
+
+def is_land(colour):
+    return max(colour) < 90 and not is_sea(colour)
+
+
+def is_sea(colour):
+    """the sea is a dark blue, and land a grey with next to no colour"""
+    red, _, blue = colour
+    return blue - red > 25
 
 
 def make_wav(path, pitch):
@@ -185,6 +219,57 @@ class LauncherTest(LauncherCase):
         self.assert_blue(TILE_SPOT, True, "home did not bring the tiles back")
         self.headunit.turn(fakehu.ROTARY, 1)
         self.assert_blue(TILE_SPOT, False, "the knob did not move to the other tile")
+
+
+class LauncherMapTest(LauncherCase):
+    """the launcher's map: the roads around the car, from a file
+    tools/fetch-map.py makes of openstreetmap's. here of one road, west to
+    east through where the car says it is, as openstreetmap would give it"""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        latitude, longitude = (degrees / 1e7 for degrees in CAR)
+        road = {"type": "way", "tags": {"highway": "primary", "name": "Main Street"},
+                "geometry": [{"lat": latitude, "lon": longitude - ROAD_REACH},
+                             {"lat": latitude, "lon": longitude + ROAD_REACH}]}
+        area = (longitude - 2 * ROAD_REACH, latitude - 2 * ROAD_REACH,
+                longitude + 2 * ROAD_REACH, latitude + 2 * ROAD_REACH)
+        (cls.dir / "maps").mkdir()
+        (cls.dir / "maps/here.bmap").write_bytes(fetch_map.build(area, [road]))
+        # and a map of the world, as natural earth would give its land: here
+        # one piece of it, whose west shore is a little west of the car
+        shore = longitude - SHORE
+        land = [[shore, latitude - 1], [longitude + 1, latitude - 1], [longitude + 1, latitude + 1],
+                [shore, latitude + 1], [shore, latitude - 1]]
+        layer = {"features": [{"geometry": {"type": "Polygon", "coordinates": [land]}}]}
+        (cls.dir / "maps/world.bmap").write_bytes(fetch_map.build_world([(layer, fetch_map.LAND)]))
+
+    def commands(self, pipe):
+        video, audio = super().commands(pipe)
+        return video.replace(" --music ", f" --maps {self.dir / 'maps'} --music "), audio
+
+    def colour(self, spot):
+        x, y = spot
+        return tuple(self.picture()[(y * WIDTH + x) * 3:][:3])
+
+    def shows(self, spot, wanted, message):
+        deadline = time.monotonic() + fakehu.TIMEOUT
+        while not wanted(self.colour(spot)):
+            self.assertLess(time.monotonic(), deadline, f"{message}: {self.colour(spot)} at {spot}")
+
+    def test_shows_the_road_the_car_is_on_and_the_knob_zooms(self):
+        self.tap(MAP_TILE)
+        self.headunit.run_until(lambda: fakehu.SENSOR_LOCATION in self.headunit.sensors_started)
+        self.headunit.sense(fakehu.SENSOR_LOCATION, None, *CAR)
+        self.shows(ROAD_NEAR, is_road, "no road beside the car")
+        self.shows(ROAD_FAR, is_road, "the road ends short of where it goes")
+        self.shows(OFF_ROAD, is_land, "something where there is only land")
+        self.shows(AT_SEA, is_sea, "land west of the shore the map of the world has there")
+        # one detent back: everything is half as far from the car, the shore too
+        self.headunit.turn(fakehu.ROTARY, -1)
+        self.shows(ROAD_FAR, is_sea, "the map is no smaller for a turn of the knob")
+        self.shows(ROAD_NEAR, is_road, "the road is gone with the map made smaller")
 
 
 if __name__ == "__main__":

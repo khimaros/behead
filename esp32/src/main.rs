@@ -10,9 +10,9 @@ mod encoder;
 mod tls;
 mod usb;
 
-use aap::{text, AudioFormat, Event, Options, Session, VideoMode};
+use aap::{sensors, text, AudioFormat, Event, Options, Session, VideoMode};
 use behead_demo::Packed;
-use behead_launcher::{App, Player, Source, MIN_SIZE};
+use behead_launcher::{maps_in, App, Map, MapSource, Player, Source, MIN_SIZE};
 use behead_link::send_when_ready;
 use encoder::{Buffer, Encoder};
 use esp_idf_svc::sys;
@@ -24,6 +24,10 @@ use std::time::{Duration, Instant};
 /// the phone certificate and key, as pem. `make certs-esp32` puts them there
 const CERTIFICATE: &str = include_str!("../certs/phone.crt");
 const KEY: &str = include_str!("../certs/phone.key");
+/// the card's folder of maps, and BUILT_IN_MAPS, the maps in the firmware
+/// itself: the ones it was built with (`ESP32_MAPS`), as build.rs lists them
+const MAPS: &str = "maps";
+include!(concat!(env!("OUT_DIR"), "/maps.rs"));
 /// pause between sessions, so a dying link is not retried in a tight loop
 const RETRY_DELAY: Duration = Duration::from_millis(100);
 /// the tallest picture tried: 30 of these a second take the encoder 16 ms
@@ -152,10 +156,15 @@ fn play((shared, epoch, format): Listener, source: &mut Source) {
 /// starts and kept: the chip's own memory, where stacks are, is soon in too
 /// many pieces to hold another that large, and a thread made for each car
 /// got its stack once
-fn music(player: Player, listeners: Receiver<Listener>) {
+fn music(player: Player, listeners: Receiver<Listener>, app: Arc<Mutex<App>>) {
     if let Err(e) = card::mount() {
         log::warn!("no card: {e}");
     }
+    // the card's maps before the ones built in, which are for a board without a card
+    let built_in = BUILT_IN_MAPS.iter().filter_map(|map| Map::open(MapSource::Bytes(map)));
+    let maps: Vec<Map> = maps_in(&Path::new(card::ROOT).join(MAPS)).into_iter().chain(built_in).collect();
+    log::info!("maps: {}", maps.len());
+    maps.into_iter().for_each(|map| app.lock().unwrap().add_map(map));
     player.scan(Path::new(card::ROOT));
     log::info!("card: {} tracks", player.tracks().len());
     let mut source = player.source();
@@ -188,8 +197,10 @@ fn handle(shared: &Shared, host: &mut Host, event: Event) -> bool {
         Event::UnknownField { channel, kind, field, value } => {
             apply(vec![text::unknown_field(kind, channel, field, &value)])
         }
+        // where the car is, for the map. the launcher takes the rest for nothing
+        Event::Sensors(readings) => apply(sensors::lines(&readings)),
         Event::Shutdown => return false,
-        // the launcher hears nothing, and draws nothing from the car's sensors
+        // the launcher hears nothing
         _ => {}
     }
     true
@@ -209,7 +220,8 @@ fn serve(reader: usb::FromHost, writer: usb::ToHost, stage: &Stage) -> Result<()
 /// takes a while to read, and the car should not wait for its picture
 fn open_stage() -> Stage {
     let (player, (listeners, waiting)) = (Player::default(), channel());
-    let finder = player.clone();
+    let app = Arc::new(Mutex::new(App::new(player.clone(), MIN_SIZE.0, MIN_SIZE.1)));
+    let (finder, mapped) = (player, app.clone());
     // SAFETY: here and below, plain settings for the threads this one makes
     // next, which esp-idf copies
     let usual = unsafe { sys::esp_pthread_get_default_config() };
@@ -218,12 +230,12 @@ fn open_stage() -> Stage {
     // has no room for it beside what the encoder needs for 720 lines
     unsafe { sys::esp_pthread_set_cfg(&roomy) };
     let thread = std::thread::Builder::new().name("music".into()).stack_size(MUSIC_STACK);
-    if let Err(e) = thread.spawn(move || music(finder, waiting)) {
+    if let Err(e) = thread.spawn(move || music(finder, waiting, mapped)) {
         log::error!("music: {e}");
     }
     // the threads made for each car go back to stacks in the chip's memory
     unsafe { sys::esp_pthread_set_cfg(&usual) };
-    Stage { app: Arc::new(Mutex::new(App::new(player, MIN_SIZE.0, MIN_SIZE.1))), listeners }
+    Stage { app, listeners }
 }
 
 /// where esp-idf starts the program. esp-idf-sys has this too, as `binstart`,

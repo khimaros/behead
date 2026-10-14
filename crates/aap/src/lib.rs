@@ -8,6 +8,7 @@ pub mod accessory;
 pub mod frame;
 pub mod h264;
 pub mod proto;
+pub mod sensors;
 pub mod session;
 pub mod text;
 

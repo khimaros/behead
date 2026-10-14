@@ -28,6 +28,8 @@ fi
 music=${BEHEAD_MEDIA:+$BEHEAD_MEDIA/music}
 music=${music:-$HOME/Music}
 mkdir -p "$music"
+# the maps tools/fetch-map.py made, beside the music
+maps=$(dirname "$music")/maps
 # ffmpeg's arguments for the encoder: the pi's own for a picture large
 # enough to gain from it, as for the sessions that record a compositor
 case $(encoder "$1" "$2" "$3") in
@@ -35,5 +37,5 @@ case $(encoder "$1" "$2" "$3") in
     *) encode="-c:v libx264 -preset ultrafast -tune zerolatency -profile:v baseline" ;;
 esac
 # shellcheck disable=SC2086
-behead-launcher --width "$1" --height "$2" --fps "$3" --music "$music" --audio "$pipe" |
+behead-launcher --width "$1" --height "$2" --fps "$3" --music "$music" --maps "$maps" --audio "$pipe" |
     ffmpeg -loglevel error -f rawvideo -pix_fmt rgb24 -s "$1x$2" -r "$3" -i - -pix_fmt yuv420p $encode -g "$3" -f h264 -

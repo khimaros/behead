@@ -451,7 +451,7 @@ impl<T: Tls> Session<T> {
             let is_media = |av: &&proto::AvChannel| {
                 av.stream_type == Some(proto::STREAM_TYPE_AUDIO) && av.audio_type == Some(proto::AUDIO_TYPE_MEDIA)
             };
-            if let Some(av) = av.filter(|av| av.stream_type == Some(proto::STREAM_TYPE_VIDEO)) {
+            if let Some(av) = av.filter(|av| av.stream_type == Some(proto::STREAM_TYPE_VIDEO) || av.video_configs.len() > 0) {
                 let flow = Flow { channel, ..Flow::default() };
                 self.video = Some(Video { flow, configs: av.video_configs.clone(), ..Video::default() });
             } else if let Some(av) = av.filter(is_media).filter(|_| self.options.media_audio && self.media.is_none()) {

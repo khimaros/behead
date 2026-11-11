@@ -91,11 +91,15 @@ fn find_udc() -> Result<String, String> {
 }
 
 /// re-enumerate under the given ids by detaching from the controller and back
-fn enumerate(udc: &str, (vendor, product): (u16, u16)) -> Result<(), String> {
-    let _ = put("UDC", "\n");
-    put("idVendor", &format!("{vendor:#06x}"))?;
-    put("idProduct", &format!("{product:#06x}"))?;
-    put("UDC", udc)
+fn enumerate(udc: &str, (vendor, product): (u16, u16), managed_endpoint: bool) -> Result<(), String> {
+    if managed_endpoint {
+        let _ = put("UDC", "\n");
+        put("idVendor", &format!("{vendor:#06x}"))?;
+        put("idProduct", &format!("{product:#06x}"))?;
+        return put("UDC", udc)
+    }
+
+    Ok(())
 }
 
 /// remove every trace of the gadget. safe to call when nothing is set up, and
@@ -158,39 +162,58 @@ fn packet_size(udc: &str) -> usize {
 
 impl Gadget {
     /// build the gadget from scratch and attach it to `udc` (or the first one found)
-    pub fn create(udc: Option<&str>) -> Result<Self, String> {
-        teardown()?;
+    pub fn create(udc: Option<&str>, endpoint_path: Option<&str>) -> Result<Self, String> {
+        let mut managed_endpoint = true;
+        let mut ffs_mount = FFS_MOUNT;
+
+        /* If an endpoint is provided, do not manage it ourselves */
+        if let Some(endpoint_path) = endpoint_path {
+            managed_endpoint = !Path::new(endpoint_path).exists();
+            ffs_mount = endpoint_path;
+            println!("Endpoint managed? {}, mount? {}", managed_endpoint, ffs_mount);
+        }
+
         if !Path::new(CONFIGFS).exists() {
             let _ = std::process::Command::new("modprobe").arg("-a").args(MODULES).status();
         }
         let udc = udc.map_or_else(find_udc, |name| Ok(name.to_string()))?;
-        for dir in [STRINGS, FUNCTION, CONFIG_STRINGS] {
-            make_dir(dir)?;
+
+        if managed_endpoint {
+            teardown()?;
+            for dir in [STRINGS, FUNCTION, CONFIG_STRINGS] {
+                make_dir(dir)?;
+            }
+            for (file, value) in [("manufacturer", MANUFACTURER), ("product", PRODUCT), ("serialnumber", SERIAL)] {
+                put(&format!("{STRINGS}/{file}"), value)?;
+            }
+            put(&format!("{CONFIG_STRINGS}/configuration"), PRODUCT)?;
+            let gadget = Path::new(GADGET);
+            context(std::os::unix::fs::symlink(gadget.join(FUNCTION), gadget.join(CONFIG_LINK)), "linking function")?;
+            mount_functionfs()?;
         }
-        for (file, value) in [("manufacturer", MANUFACTURER), ("product", PRODUCT), ("serialnumber", SERIAL)] {
-            put(&format!("{STRINGS}/{file}"), value)?;
-        }
-        put(&format!("{CONFIG_STRINGS}/configuration"), PRODUCT)?;
-        let gadget = Path::new(GADGET);
-        context(std::os::unix::fs::symlink(gadget.join(FUNCTION), gadget.join(CONFIG_LINK)), "linking function")?;
-        mount_functionfs()?;
         let endpoint = |name: &str| {
-            let path = Path::new(FFS_MOUNT).join(name);
+            let path = Path::new(ffs_mount).join(name);
             context(OpenOptions::new().read(true).write(true).open(&path), &format!("opening {}", path.display()))
         };
         let mut ep0 = endpoint("ep0")?;
         context(ep0.write_all(&descriptors()), "writing usb descriptors")?;
         context(ep0.write_all(&strings()), "writing usb strings")?;
         let (to_host, from_host) = (endpoint("ep1")?, endpoint("ep2")?);
-        enumerate(&udc, INITIAL_ID)?;
+        enumerate(&udc, INITIAL_ID, managed_endpoint)?;
         let live = Live::default();
         let (control_live, control_udc) = (live.clone(), udc.clone());
         std::thread::spawn(move || {
-            if let Err(e) = control_loop(ep0, &control_udc, &control_live) {
+            if let Err(e) = control_loop(ep0, &control_udc, &control_live, managed_endpoint) {
                 eprintln!("usb control: {e}");
                 std::process::exit(1);
             }
         });
+
+        /* For unmanaged endpoints, mark already as live */
+        if !managed_endpoint {
+            set_live(&live, true);
+        }
+
         Ok(Self { to_host, from_host, live, udc })
     }
 
@@ -248,13 +271,13 @@ fn readable_within(file: &File, timeout_ms: i32) -> bool {
 /// ends the session at once but only counts as an unplug if no enable follows
 /// within the grace period: hosts reset, reconfigure and reauthorize devices
 /// they go on using.
-fn control_loop(mut ep0: File, udc: &str, live: &Live) -> Result<(), String> {
+fn control_loop(mut ep0: File, udc: &str, live: &Live, managed_endpoint: bool) -> Result<(), String> {
     let (mut accessory, mut unplugged) = (false, false);
     let mut events = [0; FFS_EVENT_LEN * FFS_EVENT_BATCH];
     loop {
         if unplugged && !readable_within(&ep0, UNPLUG_GRACE_MS as i32) {
             (accessory, unplugged) = (false, false);
-            enumerate(udc, INITIAL_ID)?;
+            enumerate(udc, INITIAL_ID, managed_endpoint)?;
             continue;
         }
         let n = context(ep0.read(&mut events), "reading usb events")?;
@@ -264,7 +287,7 @@ fn control_loop(mut ep0: File, udc: &str, live: &Live) -> Result<(), String> {
                 EVENT_SETUP => match on_setup(&mut ep0, event)? {
                     Reply::Start(_) if !accessory => {
                         accessory = true;
-                        enumerate(udc, ACCESSORY_ID)?;
+                        enumerate(udc, ACCESSORY_ID, managed_endpoint)?;
                     }
                     Reply::Release => release(),
                     _ => {}

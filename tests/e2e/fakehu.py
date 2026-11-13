@@ -22,6 +22,12 @@ VIDEO_FOCUS_REQUEST, VIDEO_FOCUS_INDICATION = 0x8007, 0x8008
 INPUT_EVENT, BINDING_REQUEST, BINDING_RESPONSE = 0x8001, 0x8002, 0x8003
 AUDIO_FOCUS_REQUEST, AUDIO_FOCUS_RESPONSE = 0x12, 0x13
 MICROPHONE_REQUEST, MICROPHONE_RESPONSE = 0x8005, 0x8006
+# media audio ran out before the next packet came
+AUDIO_UNDERFLOW = 0x800B
+# Google's DHU sends this, with no body, on a channel where the phone sent
+# something it did not expect; the Kia EV6 too, unencrypted, after it
+# refused the certificate
+UNEXPECTED_MESSAGE = 0x00FF
 SENSOR_START_REQUEST, SENSOR_START_RESPONSE, SENSOR_EVENT = 0x8001, 0x8002, 0x8003
 
 # channel numbers as openauto assigns them
@@ -34,7 +40,7 @@ TOUCHPAD_CHANNEL = 9
 SENSOR_NIGHT, SENSOR_ENVIRONMENT, SENSOR_DRIVING_STATUS = 10, 11, 13
 SENSORS = (SENSOR_LOCATION, SENSOR_COMPASS, SENSOR_SPEED, SENSOR_RPM, SENSOR_ODOMETER, SENSOR_FUEL,
            SENSOR_PARKING_BRAKE, SENSOR_GEAR, SENSOR_NIGHT, SENSOR_ENVIRONMENT, SENSOR_DRIVING_STATUS)
-STREAM_AUDIO, AUDIO_TYPE_MEDIA, CODEC_PCM = 1, 3, 1
+STREAM_AUDIO, STREAM_VIDEO, AUDIO_TYPE_MEDIA, CODEC_PCM = 1, 3, 3, 1
 MEDIA_RATE, MEDIA_CHANNELS, MICROPHONE_RATE, MICROPHONE_CHANNELS, SAMPLE_BITS = 48000, 2, 16000, 1, 16
 FOCUS_GAIN, FOCUS_RELEASE = 1, 4
 FOCUS_STATE_GAIN, FOCUS_STATE_LOSS = 1, 3
@@ -42,9 +48,14 @@ SETUP_READY = 2
 RESOLUTION_800X480, RESOLUTION_1280X720 = 1, 2
 FPS_60, FPS_30 = 1, 2
 FOCUS_PROJECTED, FOCUS_NATIVE = 1, 2
+# auth complete statuses: a car that finished the TLS handshake can still
+# refuse the phone, as the Kia EV6 does a self-signed certificate
+AUTH_OK, AUTH_CERTIFICATE_ERROR, AUTH_FAILURE = 0, -2, -3
 TOUCH_DOWN, TOUCH_UP, TOUCH_MOVED, TOUCH_POINTER_DOWN, TOUCH_POINTER_UP = 0, 1, 2, 5, 6
 # android key codes
 HOME, BACK, DPAD_UP, DPAD_DOWN, DPAD_LEFT, DPAD_RIGHT, DPAD_CENTER = 3, 4, 19, 20, 21, 22, 23
+# the voice key, search by android's name, which Google's DHU sends for "mic begin"
+VOICE = 84
 # a rotary knob: it turns as relative events, tilts as the dpad and clicks as its centre
 ROTARY = 65536
 TOUCHSCREEN = (800, 480)
@@ -103,12 +114,16 @@ def input_channel(channel, keycodes, screen=None, pad=None):
     return field(1, channel) + field(4, keys + surfaces)
 
 
-def service_discovery_response(resolution, frame_rate, keycodes, touchpad=None, touchscreen=TOUCHSCREEN):
-    """resolution: one, or several for a car that offers a choice, the first being the one it asks for"""
+def service_discovery_response(resolution, frame_rate, keycodes, touchpad=None, touchscreen=TOUCHSCREEN,
+                               video_stream_type=True):
+    """resolution: one, or several for a car that offers a choice, the first being the one it asks for.
+    video_stream_type: False for a car that leaves the video channel's stream type out, as Google's
+    DHU does"""
     resolutions = resolution if isinstance(resolution, (tuple, list)) else (resolution,)
     video_configs = b"".join(field(4, field(1, offered) + field(2, frame_rate) + field(3, 0) + field(4, 0)
                                        + field(5, 140)) for offered in resolutions)
-    video = field(1, VIDEO_CHANNEL) + field(3, field(1, 3) + video_configs)
+    stream_type = field(1, STREAM_VIDEO) if video_stream_type else b""
+    video = field(1, VIDEO_CHANNEL) + field(3, stream_type + video_configs)
     touch = input_channel(INPUT_CHANNEL, keycodes, screen=touchscreen)
     # a pad with keys of its own, as on a steering wheel, is a second input service
     pads = [input_channel(TOUCHPAD_CHANNEL, touchpad[2], pad=touchpad[:2])] if touchpad else []
@@ -125,16 +140,20 @@ def service_discovery_response(resolution, frame_rate, keycodes, touchpad=None, 
 class FakeHeadunit:
     def __init__(self, sock, cert, key, max_unacked=4, auto_ack=True, unsolicited_focus=False,
                  resolution=RESOLUTION_800X480, frame_rate=FPS_30, verify_phone=False, trusted_phone=None,
-                 keycodes=(HOME, BACK), hold_focus=False, touchpad=None, touchscreen=TOUCHSCREEN):
+                 keycodes=(HOME, BACK), hold_focus=False, touchpad=None, touchscreen=TOUCHSCREEN,
+                 auth_status=AUTH_OK, video_stream_type=True):
         """verify_phone: check the phone certificate like a strict car, against
         no trusted authority at all, so any certificate is rejected.
         trusted_phone: check it against this one certificate instead.
+        auth_status: what auth complete reports once the handshake is done.
+        video_stream_type: False to leave the video channel's stream type out.
         keycodes: the android key codes the car says it has buttons for.
         hold_focus: stay on the car's own screen until set_video_focus.
         touchpad: (width, height, keycodes) of a touchpad on a channel of its own.
         touchscreen: its size, or None for a car driven by its buttons alone"""
         self.sock, self.max_unacked, self.auto_ack, self.screen = sock, max_unacked, auto_ack, touchscreen
-        self.keycodes, self.hold_focus, self.pad = keycodes, hold_focus, touchpad
+        self.keycodes, self.hold_focus, self.pad, self.auth_status = keycodes, hold_focus, touchpad, auth_status
+        self.video_stream_type = video_stream_type
         self.unsolicited_focus, self.resolution, self.frame_rate = unsolicited_focus, resolution, frame_rate
         self.sock.settimeout(TIMEOUT)
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -217,7 +236,11 @@ class FakeHeadunit:
                 # deliver the alert explaining the failure, as a car would
                 self.send(0, SSL_HANDSHAKE, self.outgoing.read(), encrypted=False)
                 raise
-        self.send(0, AUTH_COMPLETE, field(1, 0), encrypted=False)
+        self.send(0, AUTH_COMPLETE, field(1, self.auth_status), encrypted=False)
+
+    def send_raw(self, channel, flags, payload):
+        """one frame exactly as given, such as one a car marks encrypted that is not"""
+        self.sock.sendall(struct.pack(">BBH", channel, flags, len(payload)) + payload)
 
     def step(self):
         """receive one message and answer it the way a headunit would"""
@@ -226,7 +249,7 @@ class FakeHeadunit:
         if control and message_id == SERVICE_DISCOVERY_REQUEST:
             self.send(0, SERVICE_DISCOVERY_RESPONSE,
                       service_discovery_response(self.resolution, self.frame_rate, self.keycodes, self.pad,
-                                                 self.screen))
+                                                 self.screen, self.video_stream_type))
         elif control and message_id == CHANNEL_OPEN_REQUEST:
             self.send(channel, CHANNEL_OPEN_RESPONSE, field(1, 0), flags=FLAG_CONTROL)
         elif channel == VIDEO_CHANNEL and message_id == SETUP_REQUEST:
@@ -253,9 +276,13 @@ class FakeHeadunit:
             # like openauto: grant anything but a release
             state = FOCUS_STATE_LOSS if dict(parse(body))[1] == FOCUS_RELEASE else FOCUS_STATE_GAIN
             self.send(0, AUDIO_FOCUS_RESPONSE, field(1, state))
-        elif channel in (MEDIA_AUDIO_CHANNEL, MICROPHONE_CHANNEL) and message_id == SETUP_REQUEST:
+        elif channel == MEDIA_AUDIO_CHANNEL and message_id == SETUP_REQUEST:
             # like openauto: one packet in flight per channel
             self.send(channel, SETUP_RESPONSE, field(1, SETUP_READY) + field(2, 1) + field(3, 0))
+        elif channel == MICROPHONE_CHANNEL and message_id == SETUP_REQUEST:
+            # like Google's DHU: setup is for what the car plays, and a
+            # microphone is opened by its request alone. openauto answers it
+            self.send(channel, UNEXPECTED_MESSAGE)
         elif channel == MEDIA_AUDIO_CHANNEL and message_id == START_INDICATION:
             self.audio_session = dict(parse(body))[1]
         elif channel == MEDIA_AUDIO_CHANNEL and message_id == STOP_INDICATION:

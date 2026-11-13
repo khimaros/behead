@@ -32,6 +32,10 @@ const CERTIFICATE_REJECTIONS: [AlertDescription; 6] = [
     AlertDescription::UnknownCA,
 ];
 
+/// what to do when the headunit refuses the one certificate there is
+const ONLY_CERTIFICATE_REFUSED: &str = "tls: the headunit refused the only phone certificate. a headunit that \
+checks it against Google's authority needs a certificate Google signed: see docs/certificates.md";
+
 /// requests the headunit certificate like a phone does, then accepts any.
 /// the handshake signature is not checked either: it would only prove
 /// possession of a key nobody vouches for, and checking it means parsing the
@@ -123,10 +127,17 @@ impl Credentials {
         RustlsTls::new(config.clone(), description.clone())
     }
 
+    /// move on from a certificate the headunit refused, saying what happens next
     pub fn advance(&mut self) {
-        self.current = (self.current + 1) % self.configs.len();
-        if self.configs.len() > 1 {
-            eprintln!("tls: handshake not completed, the next connection gets certificate {}", self.current + 1);
+        let total = self.configs.len();
+        self.current = (self.current + 1) % total;
+        if total > 1 {
+            eprintln!(
+                "tls: the headunit refused the phone certificate, the next connection gets certificate {} of {total}",
+                self.current + 1
+            );
+        } else {
+            eprintln!("{ONLY_CERTIFICATE_REFUSED}");
         }
     }
 }
@@ -218,7 +229,7 @@ impl RustlsTls {
 }
 
 fn tls_error(error: impl std::fmt::Display) -> Error {
-    Error::Tls(error.to_string())
+    Error::Tls(format!("tls: {error}"))
 }
 
 impl Tls for RustlsTls {

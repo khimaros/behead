@@ -170,7 +170,11 @@ pub fn apply(state: &mut State, line: &str) {
             let points: Vec<(u32, (u32, u32))> = points.iter().filter_map(|p| parse_point(p)).collect();
             let acted = index.parse::<usize>().ok().and_then(|i| points.get(i)).copied();
             state.remember(points.iter().map(|&(_, position)| position));
-            state.pointers = points.iter().copied().collect();
+            // a pointer-up lifts one of the fingers already down: Google's
+            // DHU sends it after the up that lifted them all
+            let down = std::mem::take(&mut state.pointers);
+            let listed = points.iter().copied();
+            state.pointers = listed.filter(|(id, _)| *action != "pointer-up" || down.contains_key(id)).collect();
             match *action {
                 "up" => state.pointers.clear(),
                 "pointer-up" => drop(acted.map(|(id, _)| state.pointers.remove(&id))),
@@ -318,6 +322,20 @@ mod tests {
         apply(&mut state, "touch pointer-up 1 0:110,110 1:300,200");
         assert_eq!(state.pointers.into_iter().collect::<Vec<_>>(), vec![(0, (110, 110))]);
         assert_eq!(state.touches, 2);
+    }
+
+    #[test]
+    fn a_pinch_from_googles_dhu_leaves_no_finger_behind() {
+        // the DHU lists both fingers from the first down, and sends its up
+        // before the pointer-up that lifts the second
+        let mut state = State::default();
+        apply(&mut state, "touch down 0 0:452,251 1:467,233");
+        apply(&mut state, "touch pointer-down 1 0:452,251 1:467,233");
+        apply(&mut state, "touch move 1 0:525,181 1:393,303");
+        assert_eq!(state.pointers.len(), 2);
+        apply(&mut state, "touch up 0 0:525,181 1:393,303");
+        apply(&mut state, "touch pointer-up 1 0:525,181 1:393,303");
+        assert!(state.pointers.is_empty(), "left behind: {:?}", state.pointers);
     }
 
     #[test]

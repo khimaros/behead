@@ -63,18 +63,35 @@ and music are free to run on either core.
    authority the headunit trusts, so a handshake that starts and never
    finishes moves the next connection on to the next certificate, wrapping
    around. an accepted certificate stays in use
-3. headunit sends auth complete, we send a service discovery request
+3. headunit sends auth complete, we send a service discovery request. a
+   negative status in it is the headunit refusing the phone certificate
+   after a finished handshake, as the Kia EV6 and the DHU do: the session
+   ends there and the next connection gets the next certificate, as in step
+   2. the EV6 follows the refusal with a frame marked encrypted that is no
+   TLS record; such a frame ends a session with its bytes logged, before it
+   reaches rustls
 4. from the service discovery response we open the video and input channels,
    and the media audio and microphone channels when there is a command for
-   them
+   them. a video channel is one with that stream type, or with none and video
+   configs, as Google's DHU sends it
 5. video: setup request (h.264 baseline), wait for setup response and video
    focus, send start, then one access unit per media message
 6. input: binding request for the advertised keycodes, then input events arrive
 7. media audio: setup request (pcm), then an audio focus request on the
    control channel. start once the headunit grants focus, stop when it takes
    focus back, which it may do unprompted
-8. microphone: setup request (pcm), then a microphone open request. the
-   headunit then sends timestamped pcm, each packet acked
+8. microphone: as on a phone, opened for a voice session alone. the voice
+   key (84) sends a microphone open request, and pressing it again, or the
+   `--mic-cmd` command exiting, sends one to close it. no setup request:
+   setup is for what the headunit plays, and Google's DHU answers one here
+   with an unexpected message (0x00ff) and never opens; openauto takes
+   either. while open the headunit sends timestamped PCM, each packet acked
+
+an unexpected message (0x00ff, no body) on any channel is the headunit
+saying it did not expect what the phone last sent there, and is logged as
+that. an audio underflow (0x800b on the media channel) is the headunit
+running out of media audio: it sends one for each packet it missed, so they
+are logged at most once every 10 seconds, with a count
 
 every outgoing protobuf scalar is written even when zero, because headunits
 parse these messages as proto2 with required fields.
@@ -229,10 +246,13 @@ media audio is opened only with `--audio-cmd`, because asking for audio focus
 silences the car's own sound. guidance (speech) and system audio channels are
 not opened yet.
 
-`--mic-cmd` reads the headunit microphone. the microphone is opened as soon
-as the channel is set up and stays open for the session; a phone opens it
-only while listening, which matters once a car shows a microphone indicator.
-writes to the command never block the session: they go in pieces no larger
+`--mic-cmd` reads the headunit microphone, one run of it for each voice
+session: it starts when the voice key opens the microphone and is stopped
+when the key closes it. a command that has heard enough ends the session by
+exiting, as an assistant does when the driver stops speaking. the
+microphone used to stay open for the whole session, which the DHU took as
+the microphone being in use, and a car may show as listening. writes to the
+command never block the session: they go in pieces no larger
 than PIPE_BUF, which the kernel writes whole or not at all, so audio the
 command has no room for is dropped without splitting a sample.
 
@@ -547,7 +567,18 @@ manual `behead teardown`, removes it.
    real car adds its own decoding and display. the scripted headunit sets
    TCP_NODELAY: without it, its own acks held each touch back a frame. the
    rpi device tests measure the same on hardware.
-4. the sprinter headunit.
+4. `tests/dhu/test_dhu.py` (`make test-dhu`): Google's desktop headunit
+   (DHU) from the Android SDK, a second independent implementation and the
+   only one from Google, run headless on the host over TCP. its console
+   stands in for a driver: taps, keycodes, the rotary controller, night,
+   driving restrictions, speed and fuel, the car's own screen and back, and
+   screenshots of the video it decoded. it checks the phone certificate as
+   a strict car does, so it needs a Google signed pair, and the tests skip
+   without one: the self-signed certificate is refused after the handshake,
+   with status -3 in auth complete, as the Kia EV6 refused it. media audio
+   is left out: headless, the DHU plays it on the host's speakers, or into
+   a null device as fast as it can write.
+5. the sprinter headunit.
 
 openauto found one bug no scripted test could: it presents an x.509 v1
 certificate, which webpki refuses to parse. the scripted headunit now uses
@@ -757,14 +788,17 @@ none of these has been settled against a real headunit.
   it carries, which the tool replays. the google signed phone certificate AACS
   publishes, with its key, chains to it but expired on 2026-02-18.
   the ordered certificate list exists for these headunits; see
-  R8. `make image-rpi` puts the extracted pairs in the image behind the
-  self-signed one, so the certificate proven on the sprinter is still
-  offered first. the scripted headunit can verify like them: the session tests check
-  that an expired certificate is reported, and, given the root
-  (BEHEAD_GOOGLE_CA) and a google signed pair (BEHEAD_GOOGLE_CERT and
-  BEHEAD_GOOGLE_KEY), that the self-signed one is refused and the google
-  signed one accepted, separately and as the fallback from one to the
-  other. without them those three skip.
+  R8. `make image-rpi` puts the extracted pairs in the image ahead of the
+  self-signed one. the RPi4 forgets the accepted certificate at every boot,
+  which in a car is every start, so with the self-signed one first a strict
+  headunit refused the first connection of every drive. a headunit that
+  checks nothing, as the Sprinter's appears to, takes either; the Sprinter
+  is untried with Google's. the scripted headunit can verify like them: the
+  session tests check that an expired certificate is reported, and, given
+  the root (BEHEAD_GOOGLE_CA) and a Google signed pair (BEHEAD_GOOGLE_CERT
+  and BEHEAD_GOOGLE_KEY), that the self-signed one is refused, the Google
+  signed one accepted, and the image's list accepted on its first try.
+  without them those three skip.
 - rustls offers only modern tls 1.2 suites (ecdhe with aes-gcm or chacha).
   an older headunit that needs cbc or dhe suites would require another
   backend behind the `Tls` trait.

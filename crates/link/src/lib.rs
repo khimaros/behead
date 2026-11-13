@@ -78,7 +78,7 @@ pub fn serve<T: Tls, H>(
         let mut link = shared.0.lock().unwrap();
         let events = match link.session.receive(&buffer[..n]) {
             Ok(events) => events,
-            Err(e) => break Err(format!("session: {e:?}")),
+            Err(e) => break Err(e.to_string()),
         };
         let running = events.into_iter().all(|event| handle(&mut link, event));
         if let Err(e) = link.flush() {

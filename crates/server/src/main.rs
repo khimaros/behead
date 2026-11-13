@@ -19,7 +19,7 @@ use std::net::TcpListener;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const USAGE: &str =
     "usage: behead (--cert FILE --key FILE | --cert-dir DIR)... --video-cmd CMD [--audio-cmd CMD] [--mic-cmd CMD]
@@ -70,6 +70,10 @@ const UNPAIRED_CERT: &str = "--cert needs a --key right after it";
 const READ_BUFFER: usize = 64 * 1024;
 /// pause between usb sessions, so a dying link is not retried in a tight loop
 const RETRY_DELAY: Duration = Duration::from_millis(100);
+/// how often a run of audio underflows is logged: a headunit reports each
+/// packet it missed, which would otherwise flood the log
+const UNDERFLOW_LOG_INTERVAL: Duration = Duration::from_secs(10);
+const UNDERFLOW: &str = "audio: the headunit ran out of media audio";
 enum Transport {
     Tcp(String),
     Usb(String),
@@ -110,6 +114,30 @@ struct Host {
     microphone: Option<audio::Microphone>,
     /// the latest sensor line of each kind, by its first word
     readings: BTreeMap<String, String>,
+    underflows: Underflows,
+}
+
+/// the audio underflows not yet logged, and when one last was
+#[derive(Default)]
+struct Underflows {
+    unlogged: u32,
+    logged: Option<Instant>,
+}
+
+impl Underflows {
+    /// count one, giving the line to log when one is due
+    fn count(&mut self, now: Instant) -> Option<String> {
+        self.unlogged += 1;
+        if self.logged.is_some_and(|at| now - at < UNDERFLOW_LOG_INTERVAL) {
+            return None;
+        }
+        let line = match self.logged {
+            None => UNDERFLOW.to_string(),
+            Some(_) => format!("{UNDERFLOW} {} more times", self.unlogged),
+        };
+        (self.unlogged, self.logged) = (0, Some(now));
+        Some(line)
+    }
 }
 
 type Link = behead_link::Link<tls::RustlsTls, Host>;
@@ -316,10 +344,18 @@ fn handle(shared: &Shared, host: &mut Host, config: &Config, video: &mut Option<
             let command = command::fill(config.mic_cmd.as_deref().unwrap_or_default(), &audio::values(format));
             host.microphone = audio::Microphone::start(&command);
         }
+        Event::MicrophoneClosed => {
+            eprintln!("microphone closed");
+            host.microphone = None;
+        }
         Event::Microphone(pcm) => {
             if let Some(microphone) = host.microphone.as_mut() {
                 microphone.write(&pcm);
             }
+        }
+        Event::AudioUnderflow => host.underflows.count(Instant::now()).iter().for_each(|line| eprintln!("{line}")),
+        Event::Unexpected { channel } => {
+            eprintln!("the headunit did not expect what the phone last sent on channel {channel}")
         }
         Event::Input(input) => deliver_input(host, &input),
         Event::Sensors(readings) => {
@@ -356,15 +392,24 @@ fn serve(
     };
     let session = Session::new(credentials.endpoint()?, options);
     let shared: Shared = behead_link::open(session, writer, Host::default());
-    let result =
-        behead_link::serve(&shared, reader, |link, event| handle(&shared, &mut link.host, config, video, event));
+    let result = behead_link::serve(&shared, reader, |link, event| {
+        let running = handle(&shared, &mut link.host, config, video, event);
+        // a microphone command that exits has heard enough: the voice session ends
+        if link.host.microphone.as_mut().is_some_and(audio::Microphone::ended) {
+            let events = link.session.close_microphone().unwrap_or_default();
+            for event in events {
+                handle(&shared, &mut link.host, config, video, event);
+            }
+        }
+        running
+    });
     let mut link = shared.0.lock().unwrap();
     // encoder threads may hold the link a while longer; the devices and the
     // microphone command go now
     link.host.input_devices = None;
     link.host.microphone = None;
     video.iter().for_each(video::Source::detach);
-    if link.session.tls().refused() {
+    if link.session.tls().refused() || link.session.rejected() {
         credentials.advance();
     }
     result

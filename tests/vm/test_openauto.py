@@ -5,11 +5,9 @@ else's. needs the image built by provision.sh."""
 
 import os
 import pathlib
-import re
 import signal
 import subprocess
 import sys
-import threading
 import time
 import unittest
 
@@ -17,6 +15,7 @@ import usb.util
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "e2e"))
 import test_session as tcp
+from lines import Lines
 import test_usb as usb_tier
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -48,26 +47,6 @@ def video_command():
 
 def podman(*args, **kwargs):
     return subprocess.run(["podman", *args], check=True, capture_output=True, **kwargs).stdout
-
-
-class Lines:
-    """collects a pipe's lines on a thread, so tests can wait for one"""
-
-    def __init__(self, pipe):
-        self.lines, self.changed = [], threading.Condition()
-        threading.Thread(target=self.pump, args=(pipe,), daemon=True).start()
-
-    def pump(self, pipe):
-        for line in pipe:
-            with self.changed:
-                self.lines.append(line.decode(errors="replace").rstrip("\n"))
-                self.changed.notify_all()
-
-    def wait(self, pattern, timeout=EVENT_TIMEOUT):
-        with self.changed:
-            found = self.changed.wait_for(lambda: [l for l in self.lines if re.search(pattern, l)], timeout)
-        assert found, f"never saw {pattern!r} in:\n" + "\n".join(self.lines)
-        return found
 
 
 def grab():

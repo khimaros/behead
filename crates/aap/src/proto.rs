@@ -34,7 +34,15 @@ pub mod av {
     pub const MICROPHONE_RESPONSE: u16 = 0x8006;
     pub const VIDEO_FOCUS_REQUEST: u16 = 0x8007;
     pub const VIDEO_FOCUS_INDICATION: u16 = 0x8008;
+    /// the headunit ran out of media audio before the next packet came
+    pub const AUDIO_UNDERFLOW: u16 = 0x800B;
 }
+
+/// sent back, with no body, on a channel where the headunit did not expect
+/// what the phone sent: Google's DHU answers a setup request on its
+/// microphone channel with it, and the Kia EV6 a service discovery request
+/// after refusing the certificate
+pub const UNEXPECTED_MESSAGE: u16 = 0x00FF;
 
 pub mod input {
     pub const EVENT: u16 = 0x8001;
@@ -230,6 +238,14 @@ pub struct ChannelOpenRequest {
 pub struct StatusResponse {
     #[prost(int32, optional, tag = "1")]
     pub status: Option<i32>,
+}
+
+/// the failures a status can name. any negative status is one
+pub const STATUS_NAMES: [(i32, &str); 3] =
+    [(-1, "no compatible version"), (-2, "certificate error"), (-3, "authentication failure")];
+
+pub fn status_name(status: i32) -> &'static str {
+    STATUS_NAMES.iter().find(|(known, _)| *known == status).map_or("unknown failure", |(_, name)| name)
 }
 
 /// shared shape of ping request and response

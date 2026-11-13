@@ -70,6 +70,11 @@ impl Microphone {
         }
     }
 
+    /// whether the command is gone, or no longer reads what it is handed
+    pub fn ended(&mut self) -> bool {
+        self.input.is_none() || !matches!(self.child.try_wait(), Ok(None))
+    }
+
     /// hand recorded pcm to the command. pieces it has no room for are dropped
     pub fn write(&mut self, pcm: &[u8]) {
         for piece in pcm.chunks(PIPE_BUF) {

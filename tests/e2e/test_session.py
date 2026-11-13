@@ -43,6 +43,7 @@ AUDIO_DELAY_MS = 1000
 AUDIO_DELAY_TOLERANCE = 0.2
 MEDIA_BYTES_PER_SECOND = fakehu.MEDIA_RATE * fakehu.MEDIA_CHANNELS * fakehu.SAMPLE_BITS // 8
 MICROPHONE_PACKET, MICROPHONE_PACKETS = 640, 10
+UNDERFLOW_BURST = 5
 EXPIRED_FROM, EXPIRED_UNTIL = "20200101000000Z", "20200102000000Z"
 # a real car verifies the phone certificate against google's automotive link
 # root. the root is public but not bundled; the phone certificate it signed,
@@ -91,9 +92,9 @@ def make_cert(directory, name):
     return cert, key
 
 
-def make_rpi_certs(certs, cache):
+def make_rpi_certs(certs, cache, *variables):
     """the pi image's certificate directory, collected by `make certs-rpi`"""
-    run("make", "-C", ROOT, "certs-rpi", f"RPI_CERTS={certs}", f"CERT_CACHE={cache}")
+    run("make", "-C", ROOT, "certs-rpi", f"RPI_CERTS={certs}", f"CERT_CACHE={cache}", *variables)
 
 
 def make_expired_cert(directory, name):
@@ -611,6 +612,12 @@ class SessionTest(ServerTest):
         self.assertLess(green, 120)
         self.assertNotEqual(before[offset:offset + 3], after[offset:offset + 3])
 
+    def test_streams_to_a_video_channel_without_a_stream_type(self):
+        """Google's DHU leaves the stream type out of its video channel, and
+        only its video configs say what the channel is"""
+        headunit = self.connect(video_stream_type=False)
+        headunit.run_until(lambda: len(headunit.frames) == FRAME_COUNT)
+
     def test_logs_the_tls_handshake(self):
         self.connect()
         log = self.startup_log + self.read_output(self.server.stderr, b"tls: handshake complete")
@@ -658,6 +665,46 @@ class SessionTest(ServerTest):
         log = self.read_output(self.server.stderr, b"session ended")
         self.assertIn(b"tls: the headunit rejected the phone certificate (alert CertificateExpired)", log)
 
+    def test_logs_a_certificate_rejected_after_the_handshake(self):
+        """a car can finish the TLS handshake and refuse the phone certificate
+        only afterwards, in auth complete, as the Kia EV6 and the DHU do a
+        self-signed one. the phone stops there, rather than going on to
+        service discovery"""
+        headunit = self.connect(auth_status=fakehu.AUTH_FAILURE)
+        self.expect_closed(headunit)
+        log = self.read_output(self.server.stderr, b"session ended")
+        self.assertIn(b"auth: the headunit rejected the phone certificate after the TLS handshake "
+                      b"(status -3, authentication failure)", log)
+        self.assertIn(b"Google's authority", log, "the log says what to do about it")
+        self.assertNotIn(b"headunit authenticated", log)
+
+    def test_falls_back_after_a_rejection_in_auth_complete(self):
+        """a refusal in auth complete moves on to the next certificate, as an
+        unfinished handshake does"""
+        certs = self.dir / "certs-auth"
+        certs.mkdir(exist_ok=True)
+        for name in ("10-first", "20-second"):
+            make_cert(certs, name)
+        self.restart_server(credentials=["--cert-dir", certs])
+        self.expect_closed(self.connect(auth_status=fakehu.AUTH_FAILURE))
+        self.connect().sock.close()
+        log = b""
+        while log.count(b"tls: presenting certificate") < 2:
+            log += self.read_output(self.server.stderr, b"tls: presenting certificate")
+        self.assertIn(b"the next connection gets certificate 2 of 2", log)
+        presented = re.findall(rb"tls: presenting certificate subject O=([\w-]+), issuer ", log)
+        self.assertEqual(presented, [b"10-first", b"20-second"])
+
+    def test_names_a_frame_marked_encrypted_that_is_not(self):
+        """the Kia EV6 follows its refusal with a two byte frame marked
+        encrypted that is no TLS record. the log shows its bytes, not a
+        decryption error"""
+        headunit = self.connect()
+        headunit.send_raw(0, fakehu.FLAG_BULK | fakehu.FLAG_ENCRYPTED, b"\x00\xff")
+        log = self.read_output(self.server.stderr, b"session ended")
+        self.assertIn(b"session ended: the headunit sent a frame marked encrypted that is not a TLS record "
+                      b"(channel 0, 2 bytes: 00 ff)", log)
+
     @unittest.skipUnless(GOOGLE_CA, "set BEHEAD_GOOGLE_CA to the google automotive link root certificate")
     def test_a_car_trusting_google_rejects_a_self_signed_certificate(self):
         with self.assertRaises(ssl.SSLCertVerificationError):
@@ -672,27 +719,25 @@ class SessionTest(ServerTest):
 
     @unittest.skipUnless(GOOGLE_CA and all(GOOGLE_PAIR),
                          "set BEHEAD_GOOGLE_CA, and BEHEAD_GOOGLE_CERT and BEHEAD_GOOGLE_KEY to a google signed pair")
-    def test_a_car_trusting_google_falls_back_to_the_google_signed_certificate(self):
-        """the pi image's certificate directory, as `make certs-rpi` builds it
-        from a cache holding the root and the google signed pair: the
-        self-signed pair first, which a strict car refuses, then the google
-        signed one, which it accepts and keeps"""
+    def test_a_car_trusting_google_accepts_the_first_certificate_of_the_image(self):
+        """the RPi4 image's certificate directory, as `make certs-rpi` builds
+        it from a cache holding the root and the Google signed pair: the
+        Google signed one comes first, so a strict car takes the first
+        connection after a boot, with no refusal on the way"""
         certs, cache = self.dir / "certs-rpi", self.dir / "cache"
         cache.mkdir(exist_ok=True)
         for source, name in zip((GOOGLE_CA, *GOOGLE_PAIR), ("ca.crt", "carservice.crt", "carservice.key")):
             shutil.copy(source, cache / name)
         make_rpi_certs(certs, cache)
         self.restart_server(credentials=["--cert-dir", certs])
-        with self.assertRaises(ssl.SSLCertVerificationError):
-            self.connect(trusted_phone=GOOGLE_CA)
         self.connect(trusted_phone=GOOGLE_CA).sock.close()
         self.connect(trusted_phone=GOOGLE_CA)
         log = self.startup_log
-        while log.count(b"tls: presenting certificate") < 3:
+        while log.count(b"tls: presenting certificate") < 2:
             log += self.read_output(self.server.stderr, b"tls: presenting certificate")
         presented = re.findall(rb"tls: presenting certificate subject .*?O=([\w-]+), issuer ", log)
-        self.assertEqual(presented, [b"behead-dev", b"CarService", b"CarService"])
-        self.assertIn(b"tls: the headunit rejected the phone certificate (alert UnknownCA)", log)
+        self.assertEqual(presented, [b"CarService", b"CarService"])
+        self.assertNotIn(b"refused", log)
 
     def test_refuses_a_certificate_without_its_key(self):
         certs = self.dir / "keyless"
@@ -750,13 +795,21 @@ class SessionTest(ServerTest):
         headunit.take_audio_focus()
         headunit.run_until(lambda: headunit.audio_session is None)
 
+    def press_voice_key(self, headunit):
+        """the driver asks to speak, once the session is up and the
+        microphone channel open"""
+        headunit.run_until(lambda: len(headunit.frames) >= FRAME_COUNT)
+        headunit.button(fakehu.VOICE, True)
+        headunit.button(fakehu.VOICE, False)
+
     def test_delivers_microphone_audio(self):
         recorded = self.dir / "microphone.pcm"
         recorded.unlink(missing_ok=True)
         self.restart_server(options=["--mic-cmd", f"cat > {recorded}"])
         headunit = self.connect()
+        self.press_voice_key(headunit)
         headunit.run_until(lambda: headunit.microphone_open)
-        packets = [bytes([index]) * MICROPHONE_PACKET for index in range(MICROPHONE_PACKETS)]
+        packets =[bytes([index]) * MICROPHONE_PACKET for index in range(MICROPHONE_PACKETS)]
         for packet in packets:
             headunit.speak(packet)
         headunit.run_until(lambda: len(headunit.received(fakehu.MICROPHONE_CHANNEL, fakehu.MEDIA_ACK)) == len(packets))
@@ -764,6 +817,66 @@ class SessionTest(ServerTest):
         while (recorded.read_bytes() if recorded.exists() else b"") != b"".join(packets):
             self.assertLess(time.monotonic(), deadline, "the microphone command never got the audio")
             time.sleep(0.05)
+
+    def test_opens_the_microphone_for_the_voice_key_alone(self):
+        """as a phone does: the microphone stays shut until the driver asks
+        to speak, and opens on the request to open it, with no setup
+        request, which Google's DHU answers as an unexpected message"""
+        self.restart_server(options=["--mic-cmd", "cat > /dev/null"])
+        headunit = self.connect()
+        headunit.run_until(lambda: len(headunit.frames) == FRAME_COUNT)
+        self.assertEqual(headunit.received(fakehu.MICROPHONE_CHANNEL, fakehu.MICROPHONE_REQUEST), [])
+        self.press_voice_key(headunit)
+        headunit.run_until(lambda: headunit.microphone_open)
+        self.assertEqual(headunit.received(fakehu.MICROPHONE_CHANNEL, fakehu.SETUP_REQUEST), [])
+        log = self.read_output(self.server.stderr, b"microphone open")
+        self.assertIn(b"microphone open 16000hz 16 bit 1 channels", log)
+
+    def test_the_voice_key_again_closes_the_microphone(self):
+        self.restart_server(options=["--mic-cmd", "cat > /dev/null"])
+        headunit = self.connect()
+        self.press_voice_key(headunit)
+        headunit.run_until(lambda: headunit.microphone_open)
+        self.press_voice_key(headunit)
+        headunit.run_until(lambda: not headunit.microphone_open)
+        self.read_output(self.server.stderr, b"microphone closed")
+
+    def test_closes_the_microphone_when_its_command_ends(self):
+        """a command that has heard enough, as an assistant does when the
+        driver stops speaking, ends the voice session by exiting"""
+        self.restart_server(options=["--mic-cmd", f"head -c {MICROPHONE_PACKET} > /dev/null"])
+        headunit = self.connect()
+        self.press_voice_key(headunit)
+        headunit.run_until(lambda: headunit.microphone_open)
+        deadline = time.monotonic() + fakehu.TIMEOUT
+        while headunit.microphone_open:
+            self.assertLess(time.monotonic(), deadline, "the microphone stayed open")
+            headunit.speak(bytes(MICROPHONE_PACKET))
+            headunit.step()
+        self.read_output(self.server.stderr, b"microphone closed")
+
+    def test_names_an_unexpected_message(self):
+        """what Google's DHU and the Kia EV6 send back when they did not
+        expect what the phone sent: the log says so, not that it is unknown"""
+        headunit = self.connect()
+        headunit.run_until(lambda: len(headunit.frames) == FRAME_COUNT)
+        headunit.send(fakehu.SENSOR_CHANNEL, fakehu.UNEXPECTED_MESSAGE)
+        log = self.read_output(self.server.stderr, b"did not expect")
+        self.assertIn(b"the headunit did not expect what the phone last sent on channel 2\n", log)
+        self.assertNotIn(b"unhandled message 0x00ff", log)
+
+    def test_logs_audio_underflows_without_flooding(self):
+        """a car that runs out of media audio says so for every packet it
+        misses: one log line covers a burst"""
+        self.restart_server(options=["--audio-cmd", TONE_CMD])
+        headunit = self.connect()
+        headunit.run_until(lambda: headunit.audio)
+        for _ in range(UNDERFLOW_BURST):
+            headunit.send(fakehu.MEDIA_AUDIO_CHANNEL, fakehu.AUDIO_UNDERFLOW, fakehu.field(1, -1))
+        headunit.send(fakehu.SENSOR_CHANNEL, fakehu.UNEXPECTED_MESSAGE)
+        log = self.read_output(self.server.stderr, b"did not expect")
+        self.assertEqual(log.count(b"audio: the headunit ran out of media audio"), 1, log)
+        self.assertNotIn(b"0x800b", log)
 
     def test_accepts_a_second_headunit(self):
         self.connect().sock.close()

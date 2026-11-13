@@ -4,15 +4,53 @@ an android auto server in rust: the half of android auto that normally runs
 on a phone. it lets a raspberry pi or laptop put its own interface on a car
 headunit.
 
-status: early. sessions work over tcp and over a usb gadget, against a
-scripted headunit and against openauto, which shows the video and sends
-touch. it runs on a raspberry pi 4, tested from a laptop over usb, and a
-2021 sprinter headunit accepts its self-signed certificate. see `DESIGN.md`.
+status: early, and working in real cars. it runs on an RPi4, an ESP32-P4
+or any Linux machine, over USB or TCP. see `DESIGN.md` for how.
 
-## build
+## headunits
+
+| headunit | result |
+|---|---|
+| openauto | works |
+| 2021 Mercedes Sprinter | works |
+| Nissan Micra K14 | works |
+| Google DHU 2.0 | works with a certificate Google signed; refuses the self-signed one after the handshake |
+| Kia EV6 | refuses the self-signed certificate after the handshake; one Google signed is untried |
+
+a headunit that refuses the self-signed certificate needs one Google
+signed, taken out of the Android Auto app: see
+[docs/certificates.md](docs/certificates.md).
+
+## quick start
 
     mise install
     make
+
+then pick one:
+
+- **in a VM**, with openauto as the headunit: `make vm` once, then `make
+  demo-vm`. or with Google's DHU on this machine: `make dhu` once, then
+  `make demo-dhu`. see [try it](#try-it)
+- **on an RPi4** in the car: `make image-rpi SESSION=launcher`, set
+  `MOUNT_DEVICE` in `rpi/customize.env`, then `make flash-rpi`. see
+  [RPi4](#raspberry-pi-4) and [launcher](#launcher)
+- **on an ESP32-P4**: `make build-esp32 flash-esp32`, with Espressif's
+  toolchain. see [ESP32-P4](#esp32-p4)
+- **on this machine**, over TCP to a headunit such as Google's DHU: the
+  command in [run](#run)
+
+## contents
+
+- [run](#run): the server's options, and what it prints
+- [try it](#try-it): the demo in a VM, or with the DHU
+- [wayland applications](#wayland-applications): kiosk, kodi, phosh and
+  waydroid sessions
+- [RPi4](#raspberry-pi-4): building, flashing and updating the image
+- [ESP32-P4](#esp32-p4): the firmware
+- [launcher](#launcher): the home screen with music and maps
+- [test](#test)
+- [docs/certificates.md](docs/certificates.md): getting a certificate the
+  car accepts, and reading the TLS log when it refuses one
 
 ## run
 
@@ -23,9 +61,8 @@ touch. it runs on a raspberry pi 4, tested from a laptop over usb, and a
 - `--cert`, `--key`: certificate and private key presented to the headunit.
   repeat the pair to offer several, in order of preference
 - `--cert-dir`: offer every `NAME.crt` in a directory with its `NAME.key`,
-  in name order. when the headunit refuses a certificate (the handshake
-  starts but never finishes), its next connection gets the next certificate,
-  starting over after the last. the one it accepts stays in use
+  in name order. a headunit that refuses one gets the next on its following
+  connection: see [docs/certificates.md](docs/certificates.md)
 - `--video-cmd`: shell command writing annex-b h.264 to stdout. `{width}`,
   `{height}` and `{fps}` are replaced with the mode the headunit negotiated.
   the input lines shown below also arrive on the command's stdin, so it can
@@ -46,8 +83,11 @@ touch. it runs on a raspberry pi 4, tested from a laptop over usb, and a
   longer to reach the car's screen than sound its speakers, so without a
   delay the sound of a film runs ahead of it. on the pi it is `AUDIO_DELAY`
   in `/etc/behead/session.env`; change it and `systemctl restart behead`
-- `--mic-cmd`: shell command reading the headunit microphone as pcm on
-  stdin, with the same replacements, usually 16000 hz mono
+- `--mic-cmd`: shell command reading the headunit microphone as PCM on
+  stdin, with the same replacements, usually 16000 Hz mono. as on a phone,
+  the microphone opens for a voice session alone: the car's voice key (84)
+  starts the command, and pressing it again stops it. a command that exits
+  by itself, having heard enough, closes the microphone
 - `--listen`: tcp address to accept the headunit on, default `127.0.0.1:5277`
 - `--usb`: appear to the headunit as a usb device instead. takes the name of
   a usb device controller from `/sys/class/udc`, or `auto` for the first
@@ -151,6 +191,16 @@ latest of each kind the car sent before.
 
     make vm      # once: the test vm, with openauto inside
     make demo-vm
+
+or with Google's desktop headunit (DHU), on this machine, which needs a
+Google signed certificate ([docs/certificates.md](docs/certificates.md)):
+
+    make dhu      # once: installs it from the Android SDK in ANDROID_HOME
+    make demo-dhu
+
+its window is the car's screen, and its console takes commands such as
+`night`, `dpad rotate left` or `keycode home` (`help` lists them). the
+server's log and input lines go to `target/demo-dhu.log`.
 
 this runs the server on the vm's usb gadget with openauto as the headunit,
 and opens openauto's screen in gvncviewer when it is installed, otherwise
@@ -332,29 +382,6 @@ and point at the bus in it:
 
 android has no sound on the headunit yet.
 
-## reading the tls log
-
-`journalctl -u behead -f` on the pi shows each handshake:
-
-    tls: presenting certificate subject O=..., issuer O=..., valid FROM to UNTIL (FILE)
-    tls: headunit offers TLSv1_2 with cipher suites TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 ...
-    tls: handshake complete: TLSv1_2 TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, headunit certificate subject ...
-
-the first line names the certificate offered on this connection; check
-whether it has expired. the second lists everything the headunit can speak;
-rustls only implements the ecdhe suites with aes-gcm or chacha20, so a list
-without any of those cannot work. if the headunit refuses our certificate
-the session ends with
-
-    tls: the headunit rejected the phone certificate (alert UnknownCA)
-
-where the alert names its reason (UnknownCA: not signed by an authority it
-trusts; CertificateExpired; BadCertificate). any other tls failure is logged
-as `tls: ` followed by the error. with more than one certificate, an
-unfinished handshake is followed by
-
-    tls: handshake not completed, the next connection gets certificate N
-
 ## raspberry pi 4
 
 the image is built by [raspi-provision](../raspi-provision), checked out next
@@ -478,21 +505,9 @@ pressure stall information off, as the pi's is by default. if android stays
 black, `waydroid status` on the pi says whether its container is running.
 
 the service offers the car every `NAME.crt` and `NAME.key` pair in
-`/etc/behead/certs`, in name order, until one is accepted. the image always
-carries a self-signed pair, `90-self-signed`. supply your own as `10-phone`:
-
-    make image-rpi PHONE_CERT=phone.crt PHONE_KEY=phone.key
-
-every pair [dexter](../dexter) left in `~/.cache/behead/certs` (see
-[test](#test); `CERT_CACHE=...` for another directory) is added behind the
-self-signed one as a backup, such as `95-carservice`, and leaves the image
-again once it is gone from the cache. or drop more pairs into
-`rpi/overlay/etc/behead/certs` before building, named so they sort where
-they should be tried. the build checks that each key belongs to its
-certificate and warns about expired ones. the self-signed certificate is
-accepted by openauto and by the 2021 sprinter headunit. a headunit that
-verifies the phone certificate against google's authority refuses it and
-gets the next pair on its following connection.
+`/etc/behead/certs`, in name order, until one is accepted: Google's first
+when it has been extracted, then a self-signed pair the image always carries:
+see [docs/certificates.md](docs/certificates.md#on-the-rpi4).
 
 the usb-c port also powers the pi. a headunit port may not supply what a pi 4
 needs under load; power it through the gpio header if it browns out.
@@ -576,6 +591,7 @@ to its end and back: the line the knob is on, and the title of what plays.
     make test-e2e    # tcp, no root
     make vm          # create the test vm, once
     make test-vm     # usb gadget, pi service, openauto and desktop tests in the vm
+    make test-dhu    # Google's DHU over TCP, after `make dhu`
     make test-device               # laptop as headunit, against a pi on a usb cable
     make test-device DEVICE=esp32  # the same against an esp32-p4
 
@@ -603,23 +619,5 @@ media audio too, from the first click or key on it, which a browser waits
 for before it makes a sound. the same goes for the page behind `HEADED=1`.
 
 three tests check the phone certificate the way a strict car would, against
-google's automotive link root, and skip unless given it. one walks the pi
-image's order: the self-signed pair refused, then the google signed one
-accepted and kept. the root and a phone
-pair come from the android auto app, into ~/.cache/behead/certs, taken out
-by [dexter](../dexter), checked out next to this repo, whose config for the
-app reads the download and writes there:
-
-    tools/fetch-apk.py          # verified download, to ~/.cache/behead/apk
-    python3 ../dexter/dexter.py com.google.android.projection.gearhead   # the app's certs and key
-    BEHEAD_GOOGLE_CA=~/.cache/behead/certs/ca.crt \
-        BEHEAD_GOOGLE_CERT=~/.cache/behead/certs/carservice.crt \
-        BEHEAD_GOOGLE_KEY=~/.cache/behead/certs/carservice.key make test-e2e
-
-the extraction also recovers the pair the app itself presents, `carservice.crt`
-and `carservice.key`: a car holding the root accepts it until it expires on
-2026-12-23. the key is not in the app in the clear. it sits aes encrypted in
-the app's code, keyed by a stream the app mixes from its own certificates, and
-the tool replays that to read it.
-
-two pass only with a current google signed phone certificate (R8).
+Google's Automotive Link root, and skip unless given it: see
+[docs/certificates.md](docs/certificates.md#testing-against-googles-root).

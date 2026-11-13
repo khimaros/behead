@@ -380,8 +380,11 @@ impl Device {
     }
 }
 
-/// the fingers down once an android touch event has taken effect
-fn contacts_after(event: &proto::TouchEvent) -> Contacts {
+/// the fingers down once an android touch event has taken effect. a
+/// pointer-up lifts one finger from those already down: Google's DHU sends
+/// it after the up that lifted them all, which would otherwise put the rest
+/// back down for good
+fn contacts_after(old: &Contacts, event: &proto::TouchEvent) -> Contacts {
     let action = event.touch_action.unwrap_or(-1);
     if action == proto::TOUCH_UP {
         return Contacts::new();
@@ -390,7 +393,7 @@ fn contacts_after(event: &proto::TouchEvent) -> Contacts {
     let points = event.touch_location.iter().enumerate().filter(|(index, _)| Some(*index) != lifted);
     points
         .map(|(_, p)| (p.pointer_id.unwrap_or(0), (p.x.unwrap_or(0) as i32, p.y.unwrap_or(0) as i32)))
-        .filter(|(pointer, _)| *pointer < MAX_CONTACTS)
+        .filter(|(pointer, _)| *pointer < MAX_CONTACTS && (lifted.is_none() || old.contains_key(pointer)))
         .collect()
 }
 
@@ -470,7 +473,7 @@ impl Touchscreen {
     }
 
     fn touch(&mut self, event: &proto::TouchEvent) -> Result<(), String> {
-        let contacts = contacts_after(event);
+        let contacts = contacts_after(&self.contacts, event);
         let events = transition(&self.contacts, &contacts, &mut self.next_tracking_id);
         self.contacts = contacts;
         self.device.emit(&events)
@@ -557,6 +560,47 @@ impl Devices {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// a touch event as a car sends it: its action, the finger it applies
+    /// to, and every finger on the screen as (pointer id, x, y)
+    fn touch(action: i32, index: u32, points: &[(u32, u32, u32)]) -> proto::TouchEvent {
+        let touch_location = points
+            .iter()
+            .map(|&(pointer, x, y)| proto::TouchLocation { x: Some(x), y: Some(y), pointer_id: Some(pointer) })
+            .collect();
+        proto::TouchEvent { touch_location, action_index: Some(index), touch_action: Some(action) }
+    }
+
+    fn fingers_after(events: &[proto::TouchEvent]) -> Contacts {
+        events.iter().fold(Contacts::new(), |old, event| contacts_after(&old, event))
+    }
+
+    #[test]
+    fn a_second_finger_lifts_alone_and_the_last_with_up() {
+        let both = [(0, 100, 100), (1, 300, 200)];
+        let lifted = fingers_after(&[
+            touch(proto::TOUCH_DOWN, 0, &both[..1]),
+            touch(proto::TOUCH_POINTER_DOWN, 1, &both),
+            touch(proto::TOUCH_POINTER_UP, 1, &both),
+        ]);
+        assert_eq!(lifted, Contacts::from([(0, (100, 100))]));
+    }
+
+    #[test]
+    fn a_pinch_from_googles_dhu_leaves_no_finger_behind() {
+        // the DHU lists both fingers from the first down, and sends its up
+        // before the pointer-up that lifts the second
+        let both = [(0, 525, 181), (1, 393, 303)];
+        let pinch = [
+            touch(proto::TOUCH_DOWN, 0, &both),
+            touch(proto::TOUCH_POINTER_DOWN, 1, &both),
+            touch(proto::TOUCH_MOVED, 1, &both),
+            touch(proto::TOUCH_UP, 0, &both),
+            touch(proto::TOUCH_POINTER_UP, 1, &both),
+        ];
+        assert_eq!(fingers_after(&pinch[..3]).len(), 2);
+        assert_eq!(fingers_after(&pinch), Contacts::new());
+    }
 
     #[test]
     fn a_detent_back_holds_shift_around_tab() {

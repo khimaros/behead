@@ -19,6 +19,9 @@ const MESSAGE_ID_LEN: usize = 2;
 const TIMESTAMP_LEN: usize = 8;
 /// microphone packets the headunit may send before the phone acks one
 const MICROPHONE_MAX_UNACKED: i32 = 1;
+/// the button that starts a voice session, search by android's name, which
+/// Google's DHU sends for its "mic begin"
+const VOICE_KEY: u32 = 84;
 
 /// resolutions indexed by the codec resolution enum, which starts at 1
 const RESOLUTIONS: [(u32, u32); 9] = [
@@ -37,10 +40,43 @@ const FPS_60: i32 = 1;
 /// assumed for any field a headunit leaves out of an audio config
 const DEFAULT_AUDIO: AudioFormat = AudioFormat { rate: 48000, bits: 16, channels: 2 };
 
+/// a TLS record's content types run from change cipher spec to application
+/// data, after which come its version and length
+const TLS_CONTENT_TYPES: core::ops::RangeInclusive<u8> = 20..=23;
+const TLS_RECORD_HEADER_LEN: usize = 5;
+
 #[derive(Debug)]
 pub enum Error {
     Tls(String),
     Protocol(&'static str),
+    /// the headunit finished the TLS handshake, then refused the phone
+    /// certificate with this status in auth complete
+    AuthRejected(i32),
+    /// a frame marked encrypted whose payload is no TLS record
+    NotEncrypted {
+        channel: u8,
+        payload: Vec<u8>,
+    },
+}
+
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        match self {
+            Error::Tls(error) => write!(f, "{error}"),
+            Error::Protocol(error) => write!(f, "protocol: {error}"),
+            Error::AuthRejected(status) => write!(
+                f,
+                "auth: the headunit rejected the phone certificate after the TLS handshake (status {status}, {})",
+                proto::status_name(*status)
+            ),
+            Error::NotEncrypted { channel, payload } => {
+                write!(f, "the headunit sent a frame marked encrypted that is not a TLS record ")?;
+                write!(f, "(channel {channel}, {} bytes:", payload.len())?;
+                payload.iter().try_for_each(|byte| write!(f, " {byte:02x}"))?;
+                write!(f, ")")
+            }
+        }
+    }
 }
 
 /// memory-bio style tls endpoint, so the core stays free of io and of any
@@ -86,9 +122,18 @@ pub enum Event {
     VideoStopped,
     AudioStarted(AudioFormat),
     AudioStopped,
+    /// the voice key opened the headunit microphone
     MicrophoneOpened(AudioFormat),
+    /// the voice key, or the host, ended the voice session
+    MicrophoneClosed,
     /// pcm recorded by the headunit microphone
     Microphone(Vec<u8>),
+    /// the headunit ran out of media audio, once for each packet it missed
+    AudioUnderflow,
+    /// the headunit did not expect what the phone last sent on this channel
+    Unexpected {
+        channel: u8,
+    },
     Input(proto::InputEvent),
     /// readings from the headunit's sensors
     Sensors(proto::SensorEvent),
@@ -172,9 +217,13 @@ struct Audio {
     configs: Vec<proto::AudioConfig>,
 }
 
+/// the headunit microphone: its channel once open, and whether the phone
+/// is listening, which as on a phone is for a voice session alone
 struct Microphone {
     channel: u8,
     format: AudioFormat,
+    ready: bool,
+    listening: bool,
 }
 
 /// the headunit's sensor channel, and the sensors on it this phone reads
@@ -201,6 +250,8 @@ pub struct Session<T: Tls> {
     /// buttons can be one of its own beside the touchscreen's
     inputs: Vec<Input>,
     sensors: Option<Sensors>,
+    /// whether the headunit refused the phone certificate in auth complete
+    rejected: bool,
 }
 
 fn mode_of(config: &proto::VideoConfig) -> VideoMode {
@@ -237,6 +288,10 @@ fn decode<M: Message + Default>(body: &[u8]) -> Result<M, Error> {
     M::decode(body).map_err(|_| Error::Protocol("malformed protobuf"))
 }
 
+fn is_tls_record(payload: &[u8]) -> bool {
+    payload.len() >= TLS_RECORD_HEADER_LEN && TLS_CONTENT_TYPES.contains(&payload[0])
+}
+
 impl<T: Tls> Session<T> {
     pub fn new(tls: T, options: Options) -> Self {
         Self {
@@ -250,7 +305,14 @@ impl<T: Tls> Session<T> {
             microphone: None,
             inputs: Vec::new(),
             sensors: None,
+            rejected: false,
         }
+    }
+
+    /// whether the headunit finished the TLS handshake and then refused the
+    /// phone certificate, which a tls endpoint cannot see for itself
+    pub fn rejected(&self) -> bool {
+        self.rejected
     }
 
     /// bytes queued for the transport. must be written in the order returned.
@@ -322,7 +384,11 @@ impl<T: Tls> Session<T> {
 
     fn reassemble(&mut self, frame: Frame) -> Result<Option<(u8, u8, Vec<u8>)>, Error> {
         let Frame { channel, flags, payload } = frame;
-        let chunk = if flags & frame::FLAG_ENCRYPTED != 0 { self.tls.decrypt(&payload)? } else { payload };
+        let encrypted = flags & frame::FLAG_ENCRYPTED != 0;
+        if encrypted && !is_tls_record(&payload) {
+            return Err(Error::NotEncrypted { channel, payload });
+        }
+        let chunk = if encrypted { self.tls.decrypt(&payload)? } else { payload };
         if flags & frame::FLAG_FIRST != 0 {
             self.partial.insert(channel, chunk);
         } else {
@@ -362,6 +428,10 @@ impl<T: Tls> Session<T> {
     }
 
     fn dispatch(&mut self, channel: u8, flags: u8, id: u16, body: &[u8], events: &mut Vec<Event>) -> Result<(), Error> {
+        if id == proto::UNEXPECTED_MESSAGE {
+            events.push(Event::Unexpected { channel });
+            return Ok(());
+        }
         if channel == CONTROL_CHANNEL || flags & frame::FLAG_CONTROL != 0 {
             return self.on_control(channel, id, body, events);
         }
@@ -387,7 +457,13 @@ impl<T: Tls> Session<T> {
         }
         match id {
             input::EVENT if self.inputs.iter().any(|i| i.channel == channel) => {
-                events.push(Event::Input(decode(body)?));
+                let event: proto::InputEvent = decode(body)?;
+                let buttons = event.button_event.iter().flat_map(|b| &b.button_events);
+                if buttons.filter(|b| b.is_pressed == Some(true)).any(|b| b.scan_code == Some(VOICE_KEY)) {
+                    let listening = self.microphone.as_ref().is_some_and(|m| m.listening);
+                    self.listen(!listening, events)?;
+                }
+                events.push(Event::Input(event));
                 events.extend(unknown_fields(channel, "input", body, proto::INPUT_EVENT_FIELDS));
             }
             input::BINDING_RESPONSE => {}
@@ -409,6 +485,11 @@ impl<T: Tls> Session<T> {
                 }
             }
             control::AUTH_COMPLETE => {
+                let status = decode::<proto::StatusResponse>(body)?.status.unwrap_or(0);
+                if status < 0 {
+                    self.rejected = true;
+                    return Err(Error::AuthRejected(status));
+                }
                 let request = proto::ServiceDiscoveryRequest {
                     device_name: Some(DEVICE_NAME.to_string()),
                     device_brand: Some(DEVICE_BRAND.to_string()),
@@ -451,7 +532,12 @@ impl<T: Tls> Session<T> {
             let is_media = |av: &&proto::AvChannel| {
                 av.stream_type == Some(proto::STREAM_TYPE_AUDIO) && av.audio_type == Some(proto::AUDIO_TYPE_MEDIA)
             };
-            if let Some(av) = av.filter(|av| av.stream_type == Some(proto::STREAM_TYPE_VIDEO) || av.video_configs.len() > 0) {
+            // Google's DHU leaves the video channel's stream type out
+            let is_video = |av: &&proto::AvChannel| {
+                av.stream_type == Some(proto::STREAM_TYPE_VIDEO)
+                    || av.stream_type.is_none() && !av.video_configs.is_empty()
+            };
+            if let Some(av) = av.filter(is_video) {
                 let flow = Flow { channel, ..Flow::default() };
                 self.video = Some(Video { flow, configs: av.video_configs.clone(), ..Video::default() });
             } else if let Some(av) = av.filter(is_media).filter(|_| self.options.media_audio && self.media.is_none()) {
@@ -463,7 +549,7 @@ impl<T: Tls> Session<T> {
                 descriptor.av_input_channel.as_ref().filter(|_| self.options.microphone && self.microphone.is_none())
             {
                 let format = format_of(&source.audio_config.unwrap_or_default());
-                self.microphone = Some(Microphone { channel, format });
+                self.microphone = Some(Microphone { channel, format, ready: false, listening: false });
             } else if let Some(offered) = descriptor.sensor_channel.as_ref().filter(|_| self.sensors.is_none()) {
                 let offered = offered.sensors.iter().filter_map(|sensor| sensor.sensor_type);
                 let types = offered.filter(|sensor| proto::SENSOR_TYPES.contains(sensor)).collect();
@@ -481,13 +567,15 @@ impl<T: Tls> Session<T> {
         if response.status != Some(proto::STATUS_OK) {
             return Err(Error::Protocol("headunit refused channel open"));
         }
-        let audio = self.media.as_ref().is_some_and(|m| m.flow.channel == channel)
-            || self.microphone.as_ref().is_some_and(|m| m.channel == channel);
         if self.video.as_ref().is_some_and(|v| v.flow.channel == channel) {
             let request = proto::AvSetupRequest { codec: Some(proto::CODEC_H264_BP) };
             self.send_proto(channel, 0, av::SETUP_REQUEST, &request)?;
-        } else if audio {
+        } else if self.media.as_ref().is_some_and(|m| m.flow.channel == channel) {
             self.send_proto(channel, 0, av::SETUP_REQUEST, &proto::AvSetupRequest { codec: Some(proto::CODEC_PCM) })?;
+        } else if let Some(microphone) = self.microphone.as_mut().filter(|m| m.channel == channel) {
+            // setup is for what the headunit plays: Google's DHU answers one
+            // here as an unexpected message. the microphone waits for the voice key
+            microphone.ready = true;
         } else if let Some(keycodes) = self.inputs.iter().find(|i| i.channel == channel).map(|i| &i.keycodes) {
             let request = proto::BindingRequest { scan_codes: keycodes.iter().map(|&k| k as i32).collect() };
             self.send_proto(channel, 0, input::BINDING_REQUEST, &request)?;
@@ -559,6 +647,10 @@ impl<T: Tls> Session<T> {
                 self.send_proto(CONTROL_CHANNEL, 0, control::AUDIO_FOCUS_REQUEST, &request)
             }
             av::MEDIA_ACK => media.flow.acked(body),
+            av::AUDIO_UNDERFLOW => {
+                events.push(Event::AudioUnderflow);
+                Ok(())
+            }
             _ => {
                 events.push(Event::Unhandled { channel: media.flow.channel, id, body: body.to_vec() });
                 Ok(())
@@ -586,24 +678,38 @@ impl<T: Tls> Session<T> {
         }
     }
 
-    /// the headunit microphone: opened once set up, each packet acked as it arrives
+    /// open or close the headunit microphone, as a phone does for a voice
+    /// session. nothing happens before its channel is open, or when it is
+    /// already as asked
+    fn listen(&mut self, open: bool, events: &mut Vec<Event>) -> Result<(), Error> {
+        let Some(microphone) = self.microphone.as_mut().filter(|m| m.ready && m.listening != open) else {
+            return Ok(());
+        };
+        microphone.listening = open;
+        let (channel, format) = (microphone.channel, microphone.format);
+        let request = proto::MicrophoneRequest {
+            open: Some(open),
+            noise_cancellation: Some(false),
+            echo_cancellation: Some(false),
+            max_unacked: Some(MICROPHONE_MAX_UNACKED),
+        };
+        self.send_proto(channel, 0, av::MICROPHONE_REQUEST, &request)?;
+        events.push(if open { Event::MicrophoneOpened(format) } else { Event::MicrophoneClosed });
+        Ok(())
+    }
+
+    /// end the voice session, as the host does when its listener has heard
+    /// enough. returns the events it causes
+    pub fn close_microphone(&mut self) -> Result<Vec<Event>, Error> {
+        let mut events = Vec::new();
+        self.listen(false, &mut events)?;
+        Ok(events)
+    }
+
+    /// the headunit microphone, while listening: each packet acked as it arrives
     fn on_microphone(&mut self, id: u16, body: &[u8], events: &mut Vec<Event>) -> Result<(), Error> {
-        let Microphone { channel, format } = *self.microphone.as_ref().unwrap();
+        let channel = self.microphone.as_ref().unwrap().channel;
         match id {
-            av::SETUP_RESPONSE => {
-                let response: proto::AvSetupResponse = decode(body)?;
-                if response.media_status != Some(proto::SETUP_STATUS_OK) {
-                    return Err(Error::Protocol("headunit refused microphone setup"));
-                }
-                let request = proto::MicrophoneRequest {
-                    open: Some(true),
-                    noise_cancellation: Some(false),
-                    echo_cancellation: Some(false),
-                    max_unacked: Some(MICROPHONE_MAX_UNACKED),
-                };
-                self.send_proto(channel, 0, av::MICROPHONE_REQUEST, &request)?;
-                events.push(Event::MicrophoneOpened(format));
-            }
             // sources disagree on its field order, and nothing here depends on it
             av::MICROPHONE_RESPONSE => {}
             av::MEDIA_WITH_TIMESTAMP => {

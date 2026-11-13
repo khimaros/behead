@@ -14,8 +14,10 @@ RPI_DIR := rpi
 RPI_CERTS := $(RPI_DIR)/overlay/etc/behead/certs
 RPI_CERT_DAYS := 3650
 RPI_SELF_SIGNED := $(RPI_CERTS)/90-self-signed
-RPI_PHONE := $(RPI_CERTS)/10-phone
-RPI_CACHED := $(RPI_CERTS)/95-
+RPI_CACHED := $(RPI_CERTS)/50-
+# pairs earlier builds put there: PHONE_CERT's, and the cached ones from
+# when they followed the self-signed one
+RPI_CERTS_DROPPED := $(RPI_CERTS)/10-phone.* $(RPI_CERTS)/95-*
 CERT_CACHE ?= $(HOME)/.cache/behead/certs
 # desktop sessions. SESSION is the one shown on the headunit, in place of the
 # demo; SESSIONS names more for `make image-rpi` to install beside it
@@ -111,8 +113,30 @@ ESP32_ELF := $(ESP32_TARGET)/riscv32imafc-esp-espidf/release/behead-esp32
 ESP32_MAPS ?=
 ESP32_BUILT_IN_MAPS := $(ESP32_DIR)/maps
 
-.PHONY: build build-rpi build-esp32 test test-e2e test-e2e-rpi vm test-vm demo-vm certs-rpi sessions-rpi image-rpi \
-	flash-rpi release-rpi ota-rpi deploy-rpi certs-esp32 flash-esp32 monitor-esp32 test-device headunit precommit clean
+# `make clean-build`: cargo's own target (cargo clean), the firmware's, both
+# chips', and what image-rpi and build-esp32 copy out of them. rpi's
+# behead-launcher is tracked, so it stays
+CLEAN_BUILD := $(ESP32_DIR)/target $(ESP32_BUILT_IN_MAPS) \
+	$(RPI_DIR)/overlay/usr/local/bin/behead $(RPI_DIR)/overlay/usr/local/bin/behead-demo
+# `make clean-intermediates`: these cargo targets less the files at the top of
+# each release/ dir, the pi binaries and firmware that image-rpi and flash-esp32
+# read. the next build compiles every crate again
+CLEAN_INTERMEDIATES := target $(ESP32_DIR)/target
+# `make clean-deps`: esp-idf and its compilers, about 5 GB the next firmware
+# build fetches again, and the debs raspi-provision's bake fetched with apt
+CLEAN_DEPS := $(ESP32_DIR)/.embuild $(RPI_DIR)/images/.apt-cache
+# `make clean-data`: what sessions-rpi copies or reflinks out of the caches
+# in ~/.cache/behead, and makes again from them without a network: the
+# flatpak installation, the maps and comaps regions, the android images, and
+# the cached certificate pairs it syncs each build
+CLEAN_DATA := $(RPI_FLATPAK) $(RPI_MAPS) $(RPI_COMAPS) $(RPI_WAYDROID) $(RPI_CACHED)* $(RPI_CERTS_DROPPED)
+# no tier takes the generated self-signed pairs or esp32/certs: they are in
+# images on the pi and on boards, and a car that accepted one is shown another after a rebuild. nor rpi/images/*.img.gz,
+# which are flashable
+
+.PHONY: build build-rpi build-esp32 test test-e2e test-e2e-rpi vm test-vm demo-vm dhu test-dhu demo-dhu certs-rpi sessions-rpi image-rpi \
+	flash-rpi release-rpi ota-rpi deploy-rpi certs-esp32 flash-esp32 monitor-esp32 test-device headunit precommit \
+	clean clean-build clean-intermediates clean-deps clean-data
 
 build:
 	cargo build
@@ -198,26 +222,41 @@ demo-vm: build
 	$(call open_when_up,$(DEMO_WEB),$(if $(shell command -v gvncviewer),gvncviewer $(DEMO_VNC),xdg-open "$(DEMO_WEB)"))
 	incus exec $(VM) -t --env VIDEO_CMD="$(VIDEO_CMD)" --env SESSION="$(SESSION)" -- bash $(VM_TEST_DIR)/demo.sh
 
+# Google's DHU from the Android SDK: a second independent headunit beside
+# openauto, run on this machine over TCP. it needs a Google signed
+# certificate, as a strict car does (docs/certificates.md)
+DHU_DIR ?= $(ANDROID_HOME)/extras/google/auto
+DHU_LIBS ?= $(HOME)/.cache/behead/dhu/lib
+DHU_DIR_TESTS := tests/dhu
+dhu_env = BEHEAD_DHU_DIR=$(DHU_DIR) BEHEAD_DHU_LIBS=$(DHU_LIBS) CERT_CACHE=$(CERT_CACHE)
+dhu:
+	tools/fetch-dhu.sh $(DHU_DIR) $(DHU_LIBS)
+
+test-dhu: build
+	cd $(DHU_DIR_TESTS) && $(dhu_env) python3 -m unittest -v $(TESTS)
+
+# the demo with the DHU's window as the car's screen. its console takes
+# commands such as `night`, `dpad rotate left` or `help`
+demo-dhu: build
+	$(dhu_env) VIDEO_CMD="$(VIDEO_CMD)" $(DHU_DIR_TESTS)/demo.sh
+
 $(RPI_DIR)/customize.env:
 	cp $(RPI_DIR)/customize.env.example $@
 
-# the certificates the pi offers the car, as NAME.crt and NAME.key pairs in
-# rpi/overlay/etc/behead/certs, tried in name order until the car accepts
-# one. a self-signed pair, which openauto and the 2021 sprinter accept but a
-# stricter car may not (R8), is always there. PHONE_CERT and PHONE_KEY add a
-# pair ahead of it, and every pair ../dexter left in CERT_CACHE
-# follows it as a backup, kept in step with the cache on each build. a
-# certificate there without a key, as the root is, has nothing to present.
-# drop in any others by hand.
+# the certificates the RPi4 offers the car, as NAME.crt and NAME.key pairs
+# in rpi/overlay/etc/behead/certs, tried in name order until the car
+# accepts one: every pair ../dexter left in CERT_CACHE, kept in step with
+# the cache on each build, then a self-signed pair, which openauto accepts
+# but a stricter car does not (R8). Google's pairs go ahead of it because
+# the RPi4 forgets the accepted certificate at every boot, and a strict car would
+# refuse the first connection after each. a certificate in the cache
+# without a key, as the root is, has nothing to present. drop in any others
+# by hand.
 certs-rpi:
 	mkdir -p $(RPI_CERTS)
 	test -f $(RPI_SELF_SIGNED).key || openssl req -x509 -newkey rsa:2048 -nodes -days $(RPI_CERT_DAYS) \
 		-subj /O=behead-dev -keyout $(RPI_SELF_SIGNED).key -out $(RPI_SELF_SIGNED).crt
-ifneq ($(PHONE_KEY),)
-	install -m 644 $(PHONE_CERT) $(RPI_PHONE).crt
-	install -m 600 $(PHONE_KEY) $(RPI_PHONE).key
-endif
-	rm -f $(RPI_CACHED)*
+	rm -f $(RPI_CACHED)* $(RPI_CERTS_DROPPED)
 	for key in $(CERT_CACHE)/*.key; do cert=$${key%.key}.crt; test -f $$key && test -f $$cert || continue; \
 		name=$$(basename $$key .key); \
 		install -m 644 $$cert $(RPI_CACHED)$$name.crt; install -m 600 $$key $(RPI_CACHED)$$name.key; \
@@ -324,11 +363,20 @@ precommit:
 	cargo clippy --all-targets -- -D warnings
 	$(MAKE) test test-e2e
 
-# the firmware is its own workspace, with esp-idf and its toolchain fetched
-# beside it. of the certificates, only the ones make put there go: a pair
-# dropped into the pi's by hand stays
-clean:
+clean-build:
 	cargo clean
-	rm -rf $(ESP32_DIR)/target $(ESP32_DIR)/.embuild
-	rm -f $(ESP32_PHONE).crt $(ESP32_PHONE).key $(RPI_SELF_SIGNED).crt $(RPI_SELF_SIGNED).key \
-		$(RPI_PHONE).crt $(RPI_PHONE).key $(RPI_CACHED)*
+	rm -rf $(CLEAN_BUILD)
+
+clean-intermediates:
+	for t in $(CLEAN_INTERMEDIATES); do [ ! -d $$t ] || { \
+		find $$t -regextype posix-extended ! -type d ! -name CACHEDIR.TAG \
+			\( -name '*.d' -o ! -regex "$$t/([^/]+/)?release/[^/]+" \) -delete && \
+		find $$t -mindepth 1 -type d -empty -delete; } || exit 1; done
+
+clean-deps:
+	rm -rf $(CLEAN_DEPS)
+
+clean: clean-build clean-deps
+
+clean-data:
+	rm -rf $(CLEAN_DATA)

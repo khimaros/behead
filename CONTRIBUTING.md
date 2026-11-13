@@ -15,6 +15,11 @@ need `openssl`, `ffmpeg` with libx264, and `ffprobe` on the path.
 - `make vm`: create and provision the incus test vm from `incant.yaml`
 - `make test-vm`: usb gadget tests inside that vm. run after touching
   `gadget.rs`, the transports, or the session flow.
+- `make dhu`, `make test-dhu`, `make demo-dhu`: install Google's desktop
+  headunit (DHU) from the Android SDK (`ANDROID_HOME`, and libc++ unpacked
+  into `~/.cache/behead/dhu` when the system lacks it), then test or demo
+  the server against it over TCP. needs the Google signed pair from
+  `docs/certificates.md`; the tests skip without it or the DHU.
 - `make build-rpi`, `make test-e2e-rpi`: cross-compile for the rpi4 and run
   the tcp tests against that binary under qemu user emulation. needs clang.
 - `make image-rpi`: build the sdcard image. needs `../raspi-provision` and
@@ -74,12 +79,20 @@ name, and takes `DEVICE=` where it has to know.
   playing a generated clip into an alsa loopback that `--audio-cmd` records,
   and `test_phosh.py` taps an app open in `sessions/phosh.sh`. both build on
   `desktop.py`, which runs the server with a session and waits for it.
+- `tests/dhu`: `test_dhu.py` runs the DHU headless, driving it through
+  its console on stdin, which must stay open: it quits
+  when its input ends. `headunit.ini` is its config, and `demo.sh` the
+  demo. `tests/e2e/lines.py` waits on a process's output lines, for these
+  and `test_openauto.py`.
 - `tests/e2e/viewer.py`: the browser view behind `HEADED=1`. use it to watch
   a test, or fetch `/frame.jpg` to see what the headunit got.
 - `tests/device`: tests against a device on a usb cable, with pyusb
   supplied by `uv run --with`: `test_device.py` for any device, which a pi
   passes as it is, and `test_firmware.py` for the esp32-p4's launcher.
 - `rpi`: the raspi-provision project for the rpi4 image.
+- `docs`: what is too long for the README: `certificates.md` for getting a
+  certificate a car accepts, and `protocol-survey.md`, the published
+  protocol documentation read against AACS.
 
 `mise.toml` stays in the plain `tool = "version"` form. richer entries make
 mise require an explicit trust step, which breaks its shims until done.

@@ -44,6 +44,8 @@ const USAGE: &str =
   --usb UDC       appear to the headunit as a usb device on this controller,
                    or on the first one found when UDC is 'auto'. needs root
   --listen ADDR    tcp address to accept the headunit on (default 127.0.0.1:5277)
+  --ffs-endpoint PATH  use an existing FunctionFS endpoint instead of managing
+                   the UDC ourselves. needs root
   --uinput         also deliver touch and buttons as kernel input devices,
                    'behead touchscreen' and 'behead keys'. needs /dev/uinput
   --knob KEYS      what a turn of the car's rotary knob is with --uinput:
@@ -77,6 +79,7 @@ const UNDERFLOW: &str = "audio: the headunit ran out of media audio";
 enum Transport {
     Tcp(String),
     Usb(String),
+    FunctionFs(String, String),
 }
 
 /// where one or more phone certificates come from, in order of preference
@@ -144,8 +147,8 @@ type Link = behead_link::Link<tls::RustlsTls, Host>;
 type Shared = behead_link::Shared<tls::RustlsTls, Host>;
 
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, String> {
-    let (mut transport, mut credentials, mut cert, mut video_cmd, mut uinput) =
-        (Transport::Tcp(DEFAULT_LISTEN.into()), Vec::new(), None, None, false);
+    let (mut transport, mut credentials, mut cert, mut usb, mut video_cmd, mut uinput) =
+        (Transport::Tcp(DEFAULT_LISTEN.into()), Vec::new(), None, None, None, false);
     let (mut audio_cmd, mut mic_cmd, mut nmea_socket, mut audio_delay) = (None, None, None, Duration::ZERO);
     let (mut knob, mut back, mut max_height) = (vec![uinput::Knob::default()], uinput::Back::default(), None);
     while let Some(flag) = args.next() {
@@ -159,7 +162,14 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, String> 
         let value = args.next().ok_or(format!("missing value for {flag}"))?;
         match flag.as_str() {
             "--listen" => transport = Transport::Tcp(value),
-            "--usb" => transport = Transport::Usb(value),
+            "--usb" => {
+                usb = Some(value.clone());
+                transport = Transport::Usb(value);
+            },
+            "--ffs-endpoint" => {
+                let udc = usb.take().ok_or("--ffs-enpoint needs a --usb before it")?;
+                transport = Transport::FunctionFs(udc, value);
+            }
             "--cert" => cert = Some(PathBuf::from(value)),
             "--key" => {
                 let cert = cert.take().ok_or("--key needs a --cert before it")?;
@@ -464,8 +474,21 @@ fn teardown_on_signal() {
 
 fn run_usb(udc: &str, config: &Config, mut credentials: tls::Credentials) -> Result<(), String> {
     teardown_on_signal();
-    let gadget = gadget::Gadget::create(Some(udc).filter(|&name| name != AUTO_UDC))?;
+    let gadget = gadget::Gadget::create(Some(udc).filter(|&name| name != AUTO_UDC), None)?;
     eprintln!("usb gadget ready");
+    let mut video = None;
+    loop {
+        let (reader, writer) = gadget.accept()?;
+        eprintln!("headunit connected");
+        report(serve(reader, writer, config, &mut credentials, &mut video));
+        std::thread::sleep(RETRY_DELAY);
+    }
+}
+
+fn run_functionfs(udc: &str, endpoint: &str, config: &Config, mut credentials: tls::Credentials) -> Result<(), String> {
+    teardown_on_signal();
+    let gadget = gadget::Gadget::create(Some(udc).filter(|&name| name != AUTO_UDC), Some(endpoint))?;
+    eprintln!("usb functionfs endpoint ready");
     let mut video = None;
     loop {
         let (reader, writer) = gadget.accept()?;
@@ -485,6 +508,7 @@ fn run() -> Result<(), String> {
     match &config.transport {
         Transport::Tcp(address) => run_tcp(address, &config, credentials),
         Transport::Usb(udc) => run_usb(udc, &config, credentials),
+        Transport::FunctionFs(udc, endpoint) => run_functionfs(udc, endpoint, &config, credentials),
     }
 }
 

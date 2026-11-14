@@ -128,6 +128,7 @@ pub struct Gadget {
     from_host: File,
     live: Live,
     udc: String,
+    managed_endpoint: bool
 }
 
 /// the bulk in endpoint. a transfer that fills its last packet exactly is
@@ -214,14 +215,19 @@ impl Gadget {
             set_live(&live, true);
         }
 
-        Ok(Self { to_host, from_host, live, udc })
+        Ok(Self { to_host, from_host, live, udc, managed_endpoint })
     }
 
     /// block until a headunit has switched us to accessory mode, then hand
     /// out the read and write halves of the session stream
     pub fn accept(&self) -> Result<(File, ToHost), String> {
         let (lock, changed) = &*self.live;
-        drop(changed.wait_while(lock.lock().unwrap(), |live| !*live).unwrap());
+
+        /* Unmanaged endpoints have already all file descriptors set up */
+        if self.managed_endpoint {
+            drop(changed.wait_while(lock.lock().unwrap(), |live| !*live).unwrap());
+        }
+
         let to_host = ToHost { file: context(self.to_host.try_clone(), "ep1")?, packet: packet_size(&self.udc) };
         Ok((context(self.from_host.try_clone(), "ep2")?, to_host))
     }

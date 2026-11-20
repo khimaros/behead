@@ -1,9 +1,10 @@
 # behead on the esp32-p4
 
-firmware that makes an esp32-p4 the phone: plugged into a car's usb port,
-its high speed usb port, it shows the launcher on the headunit, encoded by
-the chip's h.264 encoder, plays the music on its microsd card as the car's
-sound, and is worked by the car's touch, buttons and knob.
+firmware that makes an ESP32-P4 the phone: plugged into a car's USB port
+(its high-speed USB port), it shows the launcher on the headunit using the
+chip's H.264 encoder, plays music from its microSD card (claiming audio focus
+only while a track is playing), draws offline maps from the card or built-in
+data, and takes the car's touch, buttons, rotary knob, and GPS location.
 
 STATUS: it runs on a board (waveshare esp32-p4-module-dev-kit, chip v1.3,
 2026-10-10), over the FULL speed port, with the laptop as headunit
@@ -96,15 +97,12 @@ the linux server the firmware holds one certificate, not a list to try.
 - the usb controller's dma, which corrupted the stream (sdkconfig.defaults).
   untried since everything that starts a usb transfer was put on one core,
   which may have been its trouble too.
-- the microphone and the car's sensors: the session leaves them unopened.
-- leaving the car its own sound while nothing plays: the firmware takes
-  the car's audio focus as soon as it connects, so the radio stops for a
-  launcher that is silent.
+- the microphone: the session leaves it unopened.
 - a card put in, or changed, while the board runs.
 - m4a files, which a card may hold beside the kinds that play.
 - room to spare for opus: it decodes at 1.6 times the speed it is heard
   while the screen is still, and falls behind beside the input test,
-  whose picture is drawn anew every time (see WORKING.md).
+  whose picture is drawn anew every time.
 - tags, covers, shuffle, and moving within a track.
 - 1080 lines: the encoder takes whole macroblocks, and the stream would
   have to say what to crop.

@@ -282,8 +282,8 @@ but nothing links its stream to the sink, which is a session manager's job
 (wireplumber), and the loopback's sink took no port configuration by itself
 either. one pulseaudio does both.
 
-the sources disagree on three audio details, recorded in WORKING.md as quirk
-candidates (R9): audio type 4, audio focus type 3, and the field order of
+the sources disagree on three audio details (quirk candidates under R9):
+audio type 4 (alarm vs telephony), audio focus type 3, and the field order of
 the microphone response. none of them affects what behead sends or reads.
 
 ## input
@@ -786,10 +786,10 @@ none of these has been settled against a real headunit.
 
 ## known risks
 
-- the sprinter headunit is the only real one tested against. openauto, the
-  only independent implementation in the tests, does not verify the phone
-  certificate at all: aasdk sets SSL_VERIFY_NONE (SSLWrapper.cpp:123), with
-  no ca store and no way to add one.
+- real headunit coverage is still small (2021 Mercedes Sprinter, Nissan Micra
+  K14, and Kia EV6). OpenAuto does not verify the phone certificate at all
+  (aasdk sets SSL_VERIFY_NONE in SSLWrapper.cpp:123); Google's DHU 2.0
+  (`make test-dhu`) does verify it against Google's root.
 - phone certificate: the 2021 sprinter headunit accepts a self-signed phone
   certificate, as openauto does. a headunit following google's guide checks
   it against one root, "Google Automotive Link" (C=US, ST=California,

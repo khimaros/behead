@@ -24,12 +24,14 @@ need `openssl`, `ffmpeg` with libx264, and `ffprobe` on the path.
   the tcp tests against that binary under qemu user emulation. needs clang.
 - `make image-rpi`: build the sdcard image. needs `../raspi-provision` and
   its prerequisites (libguestfs-tools, xz-utils). `SESSION=phosh` also
-  needs flatpak here and the network: gnome maps and its runtime are
-  fetched from flathub for the pi (`tools/fetch-flatpak.sh`, 1.7 GB, kept
-  in `~/.cache/behead/flatpak`), and the parts of the map in `MAP_AREAS`
-  with gnome maps' own downloader (`tools/fetch-maps.sh`). `make flash-rpi` writes
-  it to the sdcard, and `make ota-rpi` to the card inside a running pi,
-  over its usb cable. `make release-rpi` asks the pi for that port alone.
+  needs flatpak here and the network: flatpak apps and runtimes are fetched
+  from flathub for the pi (`tools/fetch-flatpak.sh`, kept in
+  `~/.cache/behead/flatpak`), plus offline map data via `MAP_AREAS`
+  (`tools/fetch-maps.sh`) and `COMAPS_REGIONS` (`tools/fetch-comaps.py`).
+  `make flash-rpi` writes it to the sdcard, `make ota-rpi` flashes a running
+  pi over its usb cable, `make release-rpi` asks the pi for that port alone,
+  and `make deploy-rpi` copies freshly built binaries into RAM without
+  reflashing.
 - `make test-device`: device tests against an rpi4 on a usb cable, or with
   `DEVICE=esp32` against an esp32-p4 running the firmware.
 - `make headunit`: the browser as the headunit of the device on the cable.

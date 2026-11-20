@@ -7,8 +7,9 @@ signed gets past such a headunit.
 
 | headunit | self-signed certificate |
 |---|---|
-| openauto | accepted |
+| OpenAuto | accepted |
 | 2021 Mercedes Sprinter | accepted |
+| Nissan Micra K14 | accepted |
 | Google DHU 2.0 | refused, after the handshake; Google's accepted |
 | Kia EV6 | refused, after the handshake |
 

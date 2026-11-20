@@ -1,147 +1,411 @@
 # behead
 
-an android auto server in rust: the half of android auto that normally runs
-on a phone. it lets a raspberry pi or laptop put its own interface on a car
-headunit.
+an Android Auto server in Rust: the half of Android Auto that normally runs
+on a phone. it lets a Raspberry Pi, an ESP32-P4, a Linux phone, or a laptop
+project its own interface onto a car headunit over USB or TCP.
 
-status: early, and working in real cars. it runs on an RPi4, an ESP32-P4
-or any Linux machine, over USB or TCP. see `DESIGN.md` for how.
+status: working in real cars. see [DESIGN.md](DESIGN.md) for architecture
+and protocol details.
 
 ## headunits
 
-| headunit | result |
+| headunit | status |
 |---|---|
-| openauto | works |
+| OpenAuto | works |
 | 2021 Mercedes Sprinter | works |
 | Nissan Micra K14 | works |
-| Google DHU 2.0 | works with a certificate Google signed; refuses the self-signed one after the handshake |
-| Kia EV6 | refuses the self-signed certificate after the handshake; one Google signed is untried |
+| Google DHU 2.0 | works with a Google-signed certificate; refuses self-signed after the handshake |
+| Kia EV6 | refuses self-signed after the handshake; Google-signed untried |
 
-a headunit that refuses the self-signed certificate needs one Google
-signed, taken out of the Android Auto app: see
+a headunit that refuses the self-signed certificate needs a Google-signed
+pair extracted from the Android Auto app: see
 [docs/certificates.md](docs/certificates.md).
 
 ## quick start
 
+install the pinned Rust and Python toolchains and build:
+
     mise install
     make
 
-then pick one:
+then choose a target:
 
-- **in a VM**, with openauto as the headunit: `make vm` once, then `make
-  demo-vm`. or with Google's DHU on this machine: `make dhu` once, then
-  `make demo-dhu`. see [try it](#try-it)
-- **on an RPi4** in the car: `make image-rpi SESSION=launcher`, set
-  `MOUNT_DEVICE` in `rpi/customize.env`, then `make flash-rpi`. see
-  [RPi4](#raspberry-pi-4) and [launcher](#launcher)
-- **on an ESP32-P4**: `make build-esp32 flash-esp32`, with Espressif's
-  toolchain. see [ESP32-P4](#esp32-p4)
-- **on this machine**, over TCP to a headunit such as Google's DHU: the
-  command in [run](#run)
+- **try locally**: `make vm && make demo-vm` (OpenAuto in a VM) or
+  `make dhu && make demo-dhu` (Google's DHU over TCP). see [try it](#try-it)
+- **Raspberry Pi 4**: `make image-rpi SESSION=launcher`, set `MOUNT_DEVICE`
+  in `rpi/customize.env`, then `make flash-rpi`. see
+  [Raspberry Pi 4](#raspberry-pi-4)
+- **ESP32-P4**: `make build-esp32 flash-esp32` with Espressif's toolchain.
+  see [ESP32-P4](#esp32-p4)
+- **Linux phone or desktop**: run `target/debug/behead` directly with
+  `--listen`, `--usb`, or `--functionfs`. see
+  [running the server](#running-the-server)
 
 ## contents
 
-- [run](#run): the server's options, and what it prints
-- [try it](#try-it): the demo in a VM, or with the DHU
-- [wayland applications](#wayland-applications): kiosk, kodi, phosh and
-  waydroid sessions
-- [RPi4](#raspberry-pi-4): building, flashing and updating the image
-- [ESP32-P4](#esp32-p4): the firmware
-- [launcher](#launcher): the home screen with music and maps
-- [test](#test)
-- [docs/certificates.md](docs/certificates.md): getting a certificate the
-  car accepts, and reading the TLS log when it refuses one
+- [try it](#try-it): OpenAuto VM, Google DHU, and browser headunit
+- [sessions](#sessions): launcher, kiosk, Kodi, Phosh, and Waydroid
+- [Raspberry Pi 4](#raspberry-pi-4): building, flashing, OTA updates, and media
+- [ESP32-P4](#esp32-p4): standalone microcontroller firmware
+- [running the server](#running-the-server): CLI options and stdout/stdin event format
+- [test](#test): test tiers and headed mode
+- [docs/certificates.md](docs/certificates.md): Google-signed certificates and TLS troubleshooting
 
-## run
+## try it
+
+### OpenAuto in a VM
+
+    make vm        # once: creates the test VM with OpenAuto inside
+    make demo-vm   # runs behead over the VM's USB gadget
+
+`make demo-vm` opens OpenAuto's screen in `gvncviewer` when installed, or in
+a browser otherwise (`OPEN=` skips opening it; VNC listens on port 5900).
+keyboard controls in OpenAuto: Enter, arrow keys, Escape (back), and `h`
+(home). ctrl-c stops the demo.
+
+swap the session with `SESSION=` (`wayland`, `kodi`, `phosh`, `waydroid`,
+`launcher`) or pass a custom `VIDEO_CMD=...`:
+
+    make demo-vm SESSION=phosh
+
+stop the demo before running `make test-vm`, as both use the VM's USB gadget.
+
+### Google DHU
+
+runs Google's Desktop Head Unit (DHU) directly on your machine over TCP.
+requires `ANDROID_HOME` and a Google-signed certificate
+([docs/certificates.md](docs/certificates.md)):
+
+    make dhu       # once: installs the DHU from the Android SDK
+    make demo-dhu
+
+the DHU console accepts commands such as `night`, `dpad rotate left`, and
+`keycode home` (`help` lists all commands). server logs and input events go
+to `target/demo-dhu.log`.
+
+### browser headunit
+
+plug a flashed RPi4 or ESP32-P4 into your laptop over USB and use a browser
+tab as the headunit (requires `tests/device/70-behead.rules`):
+
+    make headunit
+
+the mouse acts as a touchscreen; the mouse wheel and Page Up/Down turn the
+rotary knob; arrows tilt it; Enter clicks it; Escape is back; Home is home;
+other keys type into sessions using `--uinput`. audio plays after the first
+click or key press in the page.
+
+### the demo screen
+
+`behead-demo` is the default video source. it displays:
+
+- negotiated resolution, frame rate, and frame counter
+- a sweeping bottom bar so frame drops or stutter are visible
+- numbered coloured touch markers with drag trails
+- touch count, active fingers, rotary knob position, and touchpad contact
+- the last six input events (buttons, knob turns, touches, and any unread
+  `UNKNOWN` protocol fields or messages with their hex bytes)
+
+## sessions
+
+| session | script | what it shows | notes |
+|---|---|---|---|
+| `launcher` | `sessions/launcher.sh` | built-in car UI (music, offline maps, inputs) | no compositor needed; same UI as ESP32-P4 |
+| `wayland` | `sessions/kiosk.sh` | `behead-demo --wayland` in headless Sway | reference Wayland kiosk |
+| `kodi` | `sessions/kodi.sh` | Kodi fullscreen in headless Sway | ALSA loopback audio, offline `.nfo` library |
+| `phosh` | `sessions/phosh.sh` | Phosh mobile shell + apps | PulseAudio loopback, geoclue GPS, Flatpaks |
+| `waydroid` | `sessions/waydroid.sh` | Android apps via Waydroid | F-Droid + OsmAnd~, GPS mock provider, no audio yet |
+
+### launcher
+
+`behead-launcher` is a lightweight car UI with three tiles: **MUSIC**,
+**MAP**, and **INPUTS**. it runs on any Linux machine (`behead-launcher` on
+`PATH`), as `SESSION=launcher` on the RPi4, and natively on the ESP32-P4:
+
+    behead --cert phone.crt --key phone.key \
+        --video-cmd 'sessions/launcher.sh {width} {height} {fps}' \
+        --audio-cmd 'sessions/launcher.sh --audio {rate} {channels}'
+
+`sessions/launcher.sh` plays music from `$BEHEAD_MEDIA/music` (or `~/Music`)
+and loads offline maps from `$BEHEAD_MEDIA/maps` (or `~/maps`).
+
+- **MUSIC**: lists folders and MP3, FLAC, Opus, and WAV files by name. tap a
+  folder to open or a track to play/pause; tracks advance automatically into
+  the next folder. car media keys (play, pause, next, previous) work from any
+  screen. audio focus is claimed only while playing and released after two
+  seconds of silence so the car radio resumes when paused.
+- **MAP**: draws offline roads, water, and street names from `.bmap` files
+  around the car's GPS position (display and pan/zoom only, no search or
+  routing). build `.bmap` files from OpenStreetMap and Natural Earth data:
+
+      tools/fetch-map.py san-francisco.bmap -122.52,37.70,-122.35,37.83
+      tools/fetch-map.py world.bmap world
+
+  `world.bmap` (~0.5 MB) draws coarse coastlines and lakes anywhere on earth
+  behind regional maps (San Francisco is < 1 MB, Nashville < 3 MB).
+- **INPUTS**: the interactive input test screen from `behead-demo`.
+- **without a touchscreen**: the rotary knob moves across tiles/lists and
+  zooms the map; d-pad arrows navigate tiles, lists, and pan the map; click
+  selects; back leaves a folder or screen; home returns to the tiles.
+- **text display**: names render in uppercase ASCII; accented Latin letters
+  (European and Vietnamese) are folded to plain ASCII, other scripts show as
+  blanks, and long names scroll horizontally.
+
+### kiosk
+
+`sessions/kiosk.sh` runs any single Wayland application fullscreen in a
+headless Sway session with `--uinput` touch and button input (requires
+`sway`, `wf-recorder`, `x264`, and root for input devices without a login
+session):
+
+    behead --usb auto --cert-dir certs --uinput \
+        --video-cmd 'sessions/kiosk.sh {width} {height} {fps} behead-demo --wayland'
+
+replace `behead-demo --wayland` with any Wayland app (for example
+`kodi --windowing=wayland`).
+
+### Kodi
+
+`sessions/kodi.sh` runs Kodi in the kiosk and configures audio through an
+ALSA loopback (`snd-aloop` and `arecord` from `alsa-utils`):
+
+    --video-cmd 'sessions/kodi.sh {width} {height} {fps}' \
+    --audio-cmd 'sessions/audio.sh {rate} {channels}'
+
+- on first start, `kodi.sh` selects the ALSA Loopback device and enables
+  packaged system add-ons (requires `python3`) so Kodi does not prompt on the
+  car screen. if Kodi already has settings, select "Loopback" under
+  Settings -> System -> Audio. with PipeWire, record a virtual sink monitor
+  using `pw-record` instead of `sessions/audio.sh`.
+- media under `$BEHEAD_MEDIA/videos` and `$BEHEAD_MEDIA/music` is added as
+  sources and scanned offline using `.nfo` files generated from filenames
+  (`Title (Year).mkv`; existing `.nfo` files are preserved).
+
+### Phosh
+
+`sessions/phosh.sh` runs the Phosh mobile shell (requires `phosh`, `phoc`,
+`gnome-settings-daemon-common`, `gsettings`, `pulseaudio`, `snd-aloop`, and
+`arecord`):
+
+    --video-cmd 'sessions/phosh.sh {width} {height} {fps}' \
+    --audio-cmd 'sessions/audio.sh {rate} {channels}'
+
+- **theme and screen**: screen lock and blanking are disabled; dark mode is
+  on by default. set `BEHEAD_COLOR_SCHEME` (`light` or `car`, which follows
+  the car's night sensor) in `/etc/behead/session.env` on the RPi4.
+- **controls**: supports touch (with `squeekboard` on-screen keyboard) and
+  rotary-knob-only cars. a long click cycles the knob between focus, arrows,
+  map scroll/zoom, and letter typing (shown as an on-screen notification);
+  back acts as Escape.
+- **bundled RPi4 Flatpaks** (`sessions/depends/phosh.flatpak`):
+  - **GNOME Maps** (~1.7 GB): shows car location and pre-fetched offline map
+    areas (none unless requested at build time):
+
+        make image-rpi SESSION=phosh MAP_AREAS='Maine=-71.1,43.0,-66.9,47.5;Boston=-71.2,42.2,-70.9,42.5'
+
+  - **CoMaps** (~1.8 GB + regions): offline search and routing. defaults to
+    South Bay + Tennessee; override with `COMAPS_REGIONS`:
+
+        make image-rpi SESSION=phosh COMAPS_REGIONS='US_Maine;France_Ile-de-France_Paris'
+
+    list region names with
+    `tools/fetch-comaps.py --flatpak ~/.cache/behead/flatpak/aarch64 --list`.
+    hold a toolbar button to open its menu; tap the grey strip under the
+    buttons for overflow actions including search.
+  - **Gapless** (~1.2 GB): plays music from `$BEHEAD_MEDIA`.
+
+### Waydroid
+
+`sessions/waydroid.sh` runs Android inside the kiosk (requires `waydroid`
+and the `binder` kernel module):
+
+    --video-cmd 'sessions/waydroid.sh {width} {height} {fps}'
+
+- runs `waydroid init` automatically if needed (reusing pre-placed images in
+  `/usr/share/waydroid-extra/images` when present).
+- syncs Android night mode and GPS position/accuracy from the car's sensors
+  (speed, bearing, and altitude are not forwarded yet; audio is not wired
+  yet).
+- **apps from F-Droid**: download verified APKs with `tools/fetch-fdroid.py`:
+
+      tools/fetch-fdroid.py net.osmand.plus --abi arm64-v8a
+      tools/fetch-fdroid.py org.fdroid.fdroid --abi arm64-v8a
+
+  the session installs APKs placed in `/usr/share/behead/apks` (or
+  `$BEHEAD_APKS`), or you can bake them into `system.img` ahead of time
+  (requires `e2fsprogs`, no root):
+
+      tools/preinstall-apks.py /usr/share/waydroid-extra/images/system.img --abi arm64-v8a APK...
+
+- to run `waydroid app` commands from outside the session, set
+  `BEHEAD_RUNTIME_DIR` and point `DBUS_SESSION_BUS_ADDRESS` at
+  `$BEHEAD_RUNTIME_DIR/bus`.
+
+### encoding, GPU and location
+
+- **video encoder**: sessions automatically use hardware encoding
+  (`h264_v4l2m2m`, as on the RPi4) at 1280x720 and above when a trial encode
+  succeeds, and `x264` below. override with `BEHEAD_ENCODER=x264` or
+  `v4l2m2m` (hardware uses less CPU at the cost of 1-2 frames of latency).
+- **GPU rendering**: set `BEHEAD_RENDERER=gles2` on machines with a GPU (the
+  RPi4 `kodi`, `phosh`, and `waydroid` images set this by default).
+- **GPS / location (Linux)**: install `sessions/geoclue.conf` as
+  `/etc/geoclue/conf.d/90-behead.conf`, restart `geoclue`, and pass
+  `--nmea-socket /run/behead/nmea.sock`. Phosh enables location
+  automatically; a bare kiosk needs `allowed=true` and `system=true` for the
+  app in geoclue's config.
+
+## Raspberry Pi 4
+
+the RPi4 image is built with [raspi-provision](../raspi-provision) checked
+out beside this repository. it boots from a read-only root with a tmpfs
+overlay so sudden power loss does not corrupt the SD card.
+
+### build and flash
+
+    make image-rpi SESSION=launcher   # demo if SESSION is omitted
+    $EDITOR rpi/customize.env         # set MOUNT_DEVICE to the SD card
+    make flash-rpi SESSION=launcher   # DESTRUCTIVE: writes MOUNT_DEVICE
+
+- valid `SESSION` values: `launcher`, `wayland`, `kodi`, `phosh`, `waydroid`.
+  add `SESSIONS=...` to install extra sessions alongside the active one (for
+  example `make image-rpi SESSION=kodi SESSIONS=phosh`).
+- images are written to `rpi/images/<hostname>-<session>.img.gz` (`-demo`
+  without `SESSION`). pass the same `SESSION=` to `make flash-rpi` or
+  `make ota-rpi`.
+- packages are baked at build time (needs `qemu-system-aarch64` >= 11,
+  `dtc`, and internet access on the build host; packages are cached for later
+  builds).
+- reflashing preserves the persist partition (`/home`, `/var/lib/behead`,
+  saved Wi-Fi networks, and SSH keys) unless `WIPE=1` is set or the persist
+  partition offset changed.
+
+### updating a running RPi4
+
+flash over SSH without removing the SD card (`tests/device/70-behead.rules`
+required for USB cable mode):
+
+    make ota-rpi SESSION=launcher     # asks behead to release USB, flashes over 10.55.0.1, reboots
+    make release-rpi                  # only releases USB back to g_ether networking (10.55.0.1)
+    make deploy-rpi                   # cross-builds, copies the binaries to RAM, restarts service
+
+- pass `OTA_ADDRESS=10.55.1.1` (Ethernet) or `10.55.2.1` (hotspot) to leave
+  USB alone.
+- `make deploy-rpi` writes into the RAM overlay, so a reboot returns to the
+  image's binaries (override target host with `RPI_ADDRESS=...`).
+- on the Pi itself, `systemctl stop behead` hands the USB-C port back to
+  `g_ether` SSH. to switch sessions on-device, edit `/etc/behead/session.env`
+  and run `systemctl restart behead` (run `raspi-provision overlay-commit` to
+  persist across reboots).
+
+### media, certificates and power
+
+- **media**: copy videos to `/home/behead/media/videos` and music to
+  `/home/behead/media/music` (`BEHEAD_MEDIA`). sessions store their own state
+  under `BEHEAD_HOME=/var/lib/behead` (default `~/.behead` off the Pi).
+- **Waydroid on RPi4**: `SESSION=waydroid` adds Debian backports, caches
+  Android images in `~/.cache/behead/waydroid`, preinstalls F-Droid and
+  OsmAnd~, and sets `psi=1` on the kernel command line. if the screen stays
+  black, check `waydroid status` on the Pi.
+- **certificates**: `/etc/behead/certs` is tried in filename order: extracted
+  Google pairs (`50-*`) first, then the generated self-signed pair
+  (`90-self-signed`). see
+  [docs/certificates.md](docs/certificates.md#on-the-rpi4).
+- **power**: some car USB ports cannot supply a Pi 4 under load; power it
+  through the GPIO header if it browns out.
+
+## ESP32-P4
+
+`esp32/` contains standalone firmware that turns an ESP32-P4 board into an
+Android Auto phone running the launcher through the chip's hardware H.264
+encoder at up to 1280x720@30, with music and maps from a FAT32 microSD card:
+
+    make build-esp32                  # needs Espressif's Rust toolchain (espup)
+    make flash-esp32                  # flashes the board over USB
+    make monitor-esp32                # serial log monitor
+    make test-device DEVICE=esp32     # laptop as headunit against the board
+
+useful build variables: `ESP32_PORT=full` (use full-speed USB on GPIO 24/25),
+`ESP32_CHIP=v3` (revision v3+ silicon), and `ESP32_MAPS='file1.bmap ...'`
+(embed maps in firmware). see [esp32/README.md](esp32/README.md) for board
+wiring, card format, and current limitations.
+
+## running the server
 
     target/debug/behead \
         --cert phone.crt --key phone.key \
         --video-cmd 'ffmpeg -f lavfi -i testsrc2=size={width}x{height}:rate={fps},realtime -pix_fmt yuv420p -c:v libx264 -preset ultrafast -tune zerolatency -profile:v baseline -g {fps} -f h264 -'
 
-- `--cert`, `--key`: certificate and private key presented to the headunit.
-  repeat the pair to offer several, in order of preference
-- `--cert-dir`: offer every `NAME.crt` in a directory with its `NAME.key`,
-  in name order. a headunit that refuses one gets the next on its following
-  connection: see [docs/certificates.md](docs/certificates.md)
-- `--video-cmd`: shell command writing annex-b h.264 to stdout. `{width}`,
-  `{height}` and `{fps}` are replaced with the mode the headunit negotiated.
-  the input lines shown below also arrive on the command's stdin, so it can
-  react to them; lines it does not read in time are dropped.
-  the command keeps running while the car shows its own screen and across
-  reconnects, so the applications it shows keep their state; a new mode
-  restarts it. the car picks the stream up again at a keyframe, with the
-  parameter sets the command wrote last, so a hardware encoder that writes
-  them only once works as well as x264, which repeats them. it must produce
-  frames in real time: frames are sent as they
-  arrive. for a generated source use ffmpeg's `realtime` filter, not `-re`,
-  which lets the first half second out in one burst
-- `--audio-cmd`: shell command writing signed 16 bit little endian pcm to
-  stdout, in real time, played as the headunit's media audio. `{rate}`,
-  `{bits}` and `{channels}` are replaced with the headunit's format, usually
-  48000 hz stereo. audio focus is claimed only while the command produces
-  non-silent audio and released after two seconds of silence, so the car's
-  own radio keeps playing when nothing is playing
-- `--audio-delay`: milliseconds to hold that audio back. a picture takes
-  longer to reach the car's screen than sound its speakers, so without a
-  delay the sound of a film runs ahead of it. on the pi it is `AUDIO_DELAY`
-  in `/etc/behead/session.env`; change it and `systemctl restart behead`
-- `--mic-cmd`: shell command reading the headunit microphone as PCM on
-  stdin, with the same replacements, usually 16000 Hz mono. as on a phone,
-  the microphone opens for a voice session alone: the car's voice key (84)
-  starts the command, and pressing it again stops it. a command that exits
-  by itself, having heard enough, closes the microphone
-- `--listen`: tcp address to accept the headunit on, default `127.0.0.1:5277`
-- `--usb`: appear to the headunit as a usb device instead. takes the name of
-  a usb device controller from `/sys/class/udc`, or `auto` for the first
-  one. needs root and a machine with a device controller, such as the usb-c
-  port of an rpi4
-- `--functionfs`: be the android auto function of a usb gadget another
-  daemon owns, such as [usb-signaller](https://codeberg.org/DylanVanAssche/usb-signaller)
-  on a Linux phone, instead of building one. takes the directory its
-  functionfs is mounted on. the owner gives the gadget the accessory ids
-  `18d1:2d00` from the start and binds the controller once the server has
-  started. implies `--usb auto`
-- `--uinput`: also turn touch and buttons into kernel input devices named
-  `behead touchscreen` and `behead keys`, so applications on a wayland
-  compositor receive them directly. needs write access to `/dev/uinput`.
-  map the touchscreen to the output shown on the headunit, for example in
-  sway: `input "0:0:behead_touchscreen" map_to_output HEADLESS-1`
-- `--knob`: what a turn of the car's rotary knob types on `behead keys`, one
-  key press per detent. `focus`, the default, is tab one way and shift+tab
-  the other, which moves between the things on screen in most applications.
-  `arrows` is down and up, for applications such as kodi where tab does
-  something else. `scroll` makes each detent a notch of a mouse's wheel
-  instead, clockwise toward the hand, of a pointer that stays in the middle
-  of the screen: it zooms a map that zooms for nothing else, as comaps
-  does, about its middle, and scrolls whatever else is there. the phosh
-  session draws no pointer. `type` writes into whatever takes text: a detent
-  writes a letter, the next one another in its place (a to z, a space, 1 to
-  0), a click keeps it, a click with no letter to keep is enter, and the
-  back button takes a letter away. several of them with `,` between, as in
-  `--knob focus,arrows,scroll,type`, are stepped through by a long click of
-  the knob, and the session is told which it is on with a line `knob type`.
-  the pi image's kodi session uses `arrows` and its phosh session all four;
-  `KNOB` in `/etc/behead/behead.env` sets it for the others
-- `--back`: what the car's back button is on `behead keys`: `back`, the
-  default, or `escape`, which closes a menu or a dialog in applications made
-  for a desk. the pi image's phosh session uses `escape`; `BACK` beside
-  `KNOB` sets it
-- `--nmea-socket`: offer the car's location on a unix socket at this path,
-  as the nmea sentences of a gps receiver (GGA and RMC), for a location
-  service to read. a reader gets the latest fix when it connects and every
-  one after. anyone who can reach the socket can read it; its directory,
-  created if missing, decides who can
-- `--max-height`: the tallest picture to send, in lines. a headunit lists
-  the sizes it takes and asks for one of them; when that one is taller than
-  this, the server sends the largest listed that is not. a headunit that
-  lists none gets what it asked for
+### options
 
-in usb mode the server creates the kernel gadget on start and removes it on
-SIGINT or SIGTERM. if it was killed before it could, `behead teardown`
-removes what was left. with `--functionfs` the gadget stays as its owner
-left it.
+**certificates** (at least one required):
 
-touch, button and control events from the headunit are printed to stdout:
+- `--cert FILE --key FILE`: phone certificate and private key (PEM). repeat
+  to offer multiple pairs in order of preference.
+- `--cert-dir DIR`: offer every `NAME.crt` with its `NAME.key` in name order;
+  a refused certificate advances to the next on reconnect. see
+  [docs/certificates.md](docs/certificates.md).
+
+**media streams**:
+
+- `--video-cmd CMD`: required. shell command writing real-time Annex-B H.264
+  to stdout (`{width}`, `{height}`, `{fps}` replaced with the negotiated
+  mode). receives input and sensor lines on stdin (non-blocking; unread lines
+  are dropped). outlives focus changes and reconnects unless the mode
+  changes; the server caches the latest SPS/PPS so hardware encoders that
+  emit them once still resume cleanly. for generated ffmpeg sources, use the
+  `realtime` filter rather than `-re`.
+- `--max-height LINES`: cap negotiated video height to the largest mode the
+  headunit offers within `LINES`.
+- `--audio-cmd CMD`: shell command writing real-time signed 16-bit little
+  endian PCM to stdout (`{rate}`, `{bits}`, `{channels}`, usually 48000 Hz
+  stereo). an empty value counts as none. audio focus is claimed only when
+  non-silent audio arrives and released after two seconds of silence so the
+  car radio stays active otherwise.
+- `--audio-delay MS`: delay outgoing media audio to match video encoding and
+  decoding latency (on the RPi4, set `AUDIO_DELAY` in
+  `/etc/behead/session.env`).
+- `--mic-cmd CMD`: shell command reading headunit microphone PCM on stdin
+  (usually 16000 Hz mono). opens only on the car's voice key (84) and closes
+  when pressed again or when the command exits.
+
+**transport** (defaults to `--listen 127.0.0.1:5277`):
+
+- `--listen ADDR`: TCP address to accept a headunit on (unless `--usb` or
+  `--functionfs` is given).
+- `--usb UDC`: create a Linux USB gadget on the named controller from
+  `/sys/class/udc` (or `auto` for the first one). needs root. removes the
+  gadget on `SIGINT`/`SIGTERM`; if killed uncleanly, run `behead teardown`.
+- `--functionfs DIR`: attach to an existing FunctionFS mount owned by another
+  daemon, such as
+  [usb-signaller](https://codeberg.org/DylanVanAssche/usb-signaller) on a
+  Linux phone. the owner sets accessory IDs `18d1:2d00` and binds the UDC
+  once `behead` writes descriptors; `behead` leaves the gadget alone on exit.
+  implies `--usb auto` (pass `--usb UDC` if the host has multiple UDCs).
+
+**input and sensors**:
+
+- `--uinput`: create kernel input devices (`behead touchscreen`,
+  `behead keys`, and `behead knob` when scroll mode is enabled) via
+  `/dev/uinput`. map the touchscreen to the headless output in your
+  compositor (for Sway:
+  `input "0:0:behead_touchscreen" map_to_output HEADLESS-1`).
+- `--knob KEYS`: rotary knob mapping for `--uinput`: `focus` (Tab /
+  Shift+Tab, default), `arrows` (Down / Up), `scroll` (centred mouse wheel),
+  `type` (letter-by-letter entry: click keeps letter or sends Enter, back
+  deletes). pass a comma-separated list (e.g. `focus,arrows,scroll,type`) to
+  cycle modes on long click (`knob <mode>` is emitted on stdout/stdin). set
+  `KNOB` in `/etc/behead/behead.env` on the RPi4.
+- `--back KEY`: back button mapping for `--uinput`: `back` (default) or
+  `escape`. set `BACK` in `/etc/behead/behead.env` on the RPi4.
+- `--nmea-socket PATH`: publish car GPS fixes as NMEA (`GPGGA` and `GPRMC`)
+  on a Unix socket for location services such as `geoclue`.
+
+### input and sensor lines
+
+events from the headunit are written to stdout and to `--video-cmd`'s stdin
+(when `--video-cmd` starts, it also receives the latest reading of each
+sensor seen before startup):
 
     touch down 0 0:123,456
     touch pointer-down 1 0:123,456 1:300,200
@@ -154,479 +418,50 @@ touch, button and control events from the headunit are printed to stdout:
     touchpad down 0 0:400,300
     unknown input 1 field 9 0102
     unknown message 1 0x80f9 abcd
-
-a touch line is `touch <action> <action index> <pointer id>:<x>,<y> ...`,
-listing every finger on the screen. the action index says which of them the
-action applies to. buttons and controls are named by their android key code.
-a rotary knob is 65536: a turn is `relative 65536 <detents>`, negative one
-way and positive the other, a tilt is a dpad button (19 to 22) and a click
-the dpad's centre (23). `absolute <code> <value>` is a control moved to a
-position. a `touchpad` line is a touch line for a car's touchpad, such as
-the pads on a steering wheel, in the pad's own coordinates.
-
-what a car sends that the server has no name for is printed too, to look
-into: `unknown input <channel> field <number> <hex>` for a part of an input
-event, `unknown sensor ...` likewise, and `unknown message <channel> <id>
-<hex>` for a whole message, each with up to 32 bytes of it. the server's log
-lists what each of the car's input channels offers when it connects:
-
-    input channel 1: keys 3 4 19 20 21 22 23, touchscreen 800x480
-
-readings from the car's sensors follow the same way, one line each, for
-every sensor the car offers:
-
     location 52.5200066 13.404954 5 34.5 12.5 90.5
     night 1
     driving 0
     speed 27.78
 
-- `location <latitude> <longitude> <accuracy> <altitude> <speed> <bearing>`:
-  degrees, then metres, metres, speed and degrees
-- `compass <bearing> <pitch> <roll>` in degrees, `speed <speed>`
-- `night <0|1>`, `parking-brake <0|1>`
-- `driving <restrictions>`: 0 when nothing is restricted, otherwise bits: 1 no
-  video, 2 no keyboard, 4 no voice input, 8 no setup, 16 short messages
-- `gear <gear>`: 0 neutral, 1 to 10, 100 drive, 101 park, 102 reverse
-- `rpm`, `odometer <total> <trip>`, `fuel <level> <range> <low>` and
-  `environment <temperature> <pressure> <rain>` as the car sends them: their
-  units are not confirmed
-
-a value the car leaves out is `-`. speeds are the car's number divided by
-1000, metres per second by google's naming, though openauto sends knots.
-the video command gets these lines on stdin too, and when it starts, the
-latest of each kind the car sent before.
-
-## try it
-
-    make vm      # once: the test vm, with openauto inside
-    make demo-vm
-
-or with Google's desktop headunit (DHU), on this machine, which needs a
-Google signed certificate ([docs/certificates.md](docs/certificates.md)):
-
-    make dhu      # once: installs it from the Android SDK in ANDROID_HOME
-    make demo-dhu
-
-its window is the car's screen, and its console takes commands such as
-`night`, `dpad rotate left` or `keycode home` (`help` lists them). the
-server's log and input lines go to `target/demo-dhu.log`.
-
-this runs the server on the vm's usb gadget with openauto as the headunit,
-and opens openauto's screen in gvncviewer when it is installed, otherwise
-in the browser, to drive with the mouse and keyboard. `OPEN=` leaves that
-to you: the url is printed, and vnc listens on port 5900. touch and button
-events reaching the server are printed in the terminal. ctrl-c stops it.
-
-`make demo-vm SESSION=phosh` shows the phosh shell instead, `SESSION=kodi`
-kodi, and `SESSION=wayland` the demo as a wayland client.
-
-the screen is drawn by `behead-demo`, a small program that shows what the
-car negotiated and reacts to its input:
-
-- the resolution, frame rate and a frame counter
-- a bar sweeping along the bottom at a fixed speed, so stutter is visible
-- a numbered, coloured marker under every finger, and a trail behind drags
-- how many touches so far, how many fingers are down, and where the rotary
-  knob stands
-- where a finger rests on the car's touchpad, if it has one
-- the last six input events: every button with its name, each turn of the
-  knob, each finger going down or up, on the screen or the touchpad, and
-  anything the server could not read, as `UNKNOWN` with its bytes
-
-openauto's keys: enter, the arrow keys, escape (back) and h (home) send the
-matching android auto buttons. `VIDEO_CMD=... make demo-vm` swaps the demo for
-another video command. stop the demo before `make test-vm`; both need the
-vm's usb gadget.
-
-## wayland applications
-
-`sessions/kiosk.sh` puts one wayland application on the headunit, full
-screen in a headless sway, with the car's touch and buttons reaching it
-through `--uinput`:
-
-    behead --usb auto --cert-dir certs --uinput \
-        --video-cmd 'sessions/kiosk.sh {width} {height} {fps} behead-demo --wayland'
-
-it needs sway, wf-recorder and x264, renders on the cpu, and runs as root
-because it opens input devices without a login session. every session
-encodes with the machine's hardware encoder (`h264_v4l2m2m`, as on the
-rpi4) when the picture is 1280x720 or larger and a trial encode with ffmpeg
-works, and with x264 otherwise. `BEHEAD_ENCODER=x264` or `v4l2m2m` in the
-server's environment chooses one regardless; the hardware costs less cpu
-and adds a frame or two of delay. on a machine with a
-gpu, such as the rpi4, set `BEHEAD_RENDERER=gles2` in the server's
-environment and every session renders on it instead; on the pi android then
-opens apps in about half the time. `behead-demo
---wayland` is the same demo screen as a wayland client; any other
-application works in its place, for example kodi:
-
-    --video-cmd 'sessions/kiosk.sh {width} {height} {fps} kodi --windowing=wayland'
-
-taps and the car's back, dpad and enter buttons are tested with kodi.
-`sessions/kodi.sh` runs it that way and adds sound: a kodi without settings
-is set to play into one end of an alsa loopback, and `sessions/audio.sh`
-records the other end for the car:
-
-    --video-cmd 'sessions/kodi.sh {width} {height} {fps}' \
-    --audio-cmd 'sessions/audio.sh {rate} {channels}'
-
-this needs the snd-aloop kernel module and arecord, from alsa-utils. a kodi
-that already has settings keeps its audio device; choose "Loopback" under
-settings, system, audio. an empty `--audio-cmd` counts as none. with
-pipewire, record a virtual sink's monitor with `pw-record` instead.
-
-kodi asks on its first start whether to enable each add-on that came as a
-system package of its own, such as the spectrum visualization. `kodi.sh`
-switches those on before a kodi's first start, so nothing is asked on the
-car's screen. needs python3.
-
-`sessions/phosh.sh` shows the phosh mobile shell, as on mobian and
-droidian, with its overview and apps on the headunit:
-
-    --video-cmd 'sessions/phosh.sh {width} {height} {fps}'
-
-the pi image brings the gnome settings and a terminal with it
-(`sessions/depends/phosh` lists them, and is where to add more), and gnome
-maps, which shows where the car is. it has the map of the places an image
-is built with for when there is no network, which is none unless asked for:
-
-    make image-rpi SESSION=phosh MAP_AREAS='Maine=-71.1,43.0,-66.9,47.5;Boston=-71.2,42.2,-70.9,42.5'
-
-each a name and its west, south, east and north edges in degrees. the map
-is there offline; searching it and finding a route still ask the network.
-gnome maps is a flatpak (`sessions/depends/phosh.flatpak`), because it
-keeps maps from its version 51 and debian stable has 48. it adds about
-1.7 GB to the image, and two cities some 80 MB. gnome maps treats the
-places as its own afterwards: it brings them up to date when it has a
-network, and more can be added in its preferences.
-
-for searching the map and finding a route with no network there is comaps
-beside it, which does both on regions it keeps on the device: the south of
-the san francisco bay and tennessee, unless the image is built for others,
-
-    make image-rpi SESSION=phosh COMAPS_REGIONS='US_Maine;France_Ile-de-France_Paris'
-
-by comaps' own names for them, which `tools/fetch-comaps.py --flatpak
-~/.cache/behead/flatpak/aarch64 --list` prints. comaps is a program for a
-desk, with a mouse's small buttons. the session has a button's list open
-for a finger held on it, where comaps wants the small arrow beside it
-touched, and the grey strip under the buttons opens the ones a small
-screen has no room for, search among them. its map is dark or light as the style
-was when the session started, and does not follow the car after that. it adds 1.8 GB to the image and the three regions 550 MB.
-
-gapless, a third flatpak, plays the music under `BEHEAD_MEDIA`, the files
-kodi and the launcher play, to the car. it adds 1.2 GB, nearly all of it
-the gnome runtime it is built on, which is not the one gnome maps uses.
-
-it needs phosh, phoc, gnome-settings-daemon-common and gsettings, and like
-the kiosk it renders on the cpu and runs as root. the screen does not lock
-or blank, and applications are asked for their dark style. `BEHEAD_COLOR_SCHEME`
-chooses another: `light`, or `car`, which is dark until the car says it is
-day and follows the car from then on. on the pi it is a line of
-`/etc/behead/session.env`. a car without a touchscreen drives it with its knob: a turn
-moves between the overview's icons, a click opens one, and the home button
-goes to the overview and back. a click held for most of a second takes the
-knob to its next use, which a note on the screen names: from moving between
-things, to moving up and down a list, to a map's zoom, to writing, and round
-again. back closes a menu or a dialog. where something wants text, phosh
-brings up its keyboard on the screen for a finger (squeekboard, when it is
-installed); the knob writes without it.
-
-the session runs a pulseaudio of its own, so its applications have sound.
-it plays into the same alsa loopback as kodi, and the same command records
-it for the car:
-
-    --audio-cmd 'sessions/audio.sh {rate} {channels}'
-
-this needs pulseaudio, the snd-aloop kernel module and arecord.
-
-linux applications learn where the car is from geoclue, which reads the
-server's nmea socket. install `sessions/geoclue.conf` as
-`/etc/geoclue/conf.d/90-behead.conf`, restart geoclue, and add the flag:
-
-    behead ... --nmea-socket /run/behead/nmea.sock
-
-geoclue answers an application only when the user's shell agrees. phosh
-does, and the session switches its location setting on. a bare kiosk has no
-shell to ask, so there the application needs an entry of its own in
-geoclue's configuration (`allowed=true`, `system=true`).
-
-`sessions/waydroid.sh` shows android, through waydroid: its launcher and
-apps, with the car's touch and its home and back buttons:
-
-    --video-cmd 'sessions/waydroid.sh {width} {height} {fps}'
-
-it needs waydroid and the binder kernel module. where waydroid has not been
-set up, the session does it: `waydroid init`, which downloads android's
-images, about 1 GB, unless they are in `/usr/share/waydroid-extra/images`,
-and android set to render on the cpu, as the session's compositor does.
-android's night mode follows the car's, and the car's position becomes
-android's gps location, for apps such as osmand~. android gets the position
-and its accuracy; speed, bearing and altitude do not reach it yet.
-
-apps come from f-droid. `tools/fetch-fdroid.py` downloads one, checking
-f-droid's signature on its index and the app's hash, and the session
-installs every apk it finds in `/usr/share/behead/apks`, or the directory
-BEHEAD_APKS names, that android does not have yet:
-
-    tools/fetch-fdroid.py net.osmand.plus --abi arm64-v8a      # osmand~
-    tools/fetch-fdroid.py org.fdroid.fdroid --abi arm64-v8a    # the f-droid client
-
-installing takes android minutes on a small machine. to have the apps there
-from android's first start, put them in its system image ahead of time:
-
-    tools/preinstall-apks.py /usr/share/waydroid-extra/images/system.img --abi arm64-v8a APK...
-
-this writes each apk, and its native libraries for that abi, to
-`/system/app` in the image, growing it to fit. it needs e2fsprogs, no root,
-and no android running. apps added this way cannot be removed from the
-car's screen, only updated.
-
-`waydroid app install` and `waydroid app launch` talk to the session over
-its own bus. to use them from outside, name the session's runtime directory
-and point at the bus in it:
-
-    --video-cmd 'env BEHEAD_RUNTIME_DIR=/run/behead-session sessions/waydroid.sh {width} {height} {fps}'
-    DBUS_SESSION_BUS_ADDRESS=unix:path=/run/behead-session/bus waydroid app launch net.osmand.plus
-
-android has no sound on the headunit yet.
-
-## raspberry pi 4
-
-the image is built by [raspi-provision](../raspi-provision), checked out next
-to this repo. it runs from a read-only root, so cutting power does not
-corrupt the card.
-
-    make image-rpi                       # builds rpi/images/behead-demo.img.gz
-    $EDITOR rpi/customize.env            # set MOUNT_DEVICE to the sdcard
-    make flash-rpi                       # DESTRUCTIVE: writes MOUNT_DEVICE
-
-settings live in `rpi/customize.env`, created from `customize.env.example` on
-the first build. both targets run raspi-provision straight from its
-checkout; the `raspi-provision` commands shown further down need it
-installed (`make install` in that repo). the image is named after the
-hostname and the session it shows, `-demo` without one, so images of several
-sessions can sit side by side. give `make flash-rpi` the same `SESSION` to
-write that one.
-
-a card that was flashed before keeps what is on raspi-provision's persist
-partition: `/home`, with the media kodi plays, `/var/lib/behead`, with each
-session's own settings and android's data, the saved networks and the pi's
-ssh keys. `WIPE=1`, with `make flash-rpi` or `make ota-rpi`, starts the card
-over. it is also started over, and says so, when the new image puts that
-partition somewhere else, as an image of a much larger session does.
-
-the packages in `rpi/depends`, ffmpeg for the default video command, are
-installed into the image when it is built. that needs qemu-system-aarch64
-11 or newer, dtc and internet access on the build host, and makes the first
-build slow; later builds reuse the downloaded packages.
-
-### flashing a running pi
-
-the card can stay in the pi, in its case:
-
-    make ota-rpi                         # DESTRUCTIVE: replaces the pi's system, and restarts it
-
-sends the image over ssh to a pi that is up, through the usb cable it is
-on. android auto has that port, so behead is first asked over the cable to
-give it up: the service ends, usb networking comes back as it is with the
-service stopped, and the pi answers at 10.55.0.1. `SESSION` chooses the
-image as it does for `make flash-rpi`, and like a flash it keeps settings
-and media unless `WIPE=1`. `OTA_ADDRESS=10.55.1.1` (ethernet) or
-`10.55.2.1` (the hotspot) sends it that way instead and leaves the usb port
-alone.
-
-    make release-rpi                     # only the first half: the usb port back to networking
-
-leaves the pi reachable over the cable for `ssh` or `make deploy-rpi
-RPI_ADDRESS=10.55.0.1`, until `systemctl start behead` there or a restart
-gives android auto the port again. both need the udev rule in
-`tests/device/70-behead.rules`. anything the pi is plugged into could send
-the same request, and gains what a pi with its service stopped offers: a
-network link and an ssh login that still wants a key or the password.
-
-the pi goes on running from memory while its card is written. a transfer
-that fails leaves the card half written and the pi still up, to be sent the
-image again; a pi that loses power in that state needs its card in a reader.
-so does one whose new image does not start.
-
-to try a change on a running pi without reflashing:
-
-    make deploy-rpi      # cross-builds, copies both binaries, restarts the service
-
-the copies live in the ram layer, so a reboot returns to the image's
-binaries. it logs in as raspi-provision does (root at `ADDRESS` from
-`rpi/customize.env`; override with `RPI_ADDRESS=...`).
-
-the `behead` service starts on boot and takes the usb-c port for android
-auto. `systemctl stop behead` on the pi hands the port back to ssh over
-usb. the video command is set in `/etc/behead/behead.env`, and shows the
-demo.
-
-to put a session on the headunit instead, name it when building:
-
-    make image-rpi SESSION=phosh                 # wayland, kodi, phosh, waydroid or launcher
-    make image-rpi SESSION=kodi SESSIONS=phosh   # kodi shown, phosh installed beside it
-
-`SESSION` is the session shown, and `SESSIONS` installs more to switch to
-on the device. each brings the packages listed for it in `sessions/depends`.
-the session scripts are in `/usr/local/lib/behead/sessions` on every image,
-and the choice is the `VIDEO_CMD` in `/etc/behead/session.env`, which the
-service reads after `behead.env`. to switch on the device, edit or remove
-that file and `systemctl restart behead`; on the read-only root that lasts
-until the next boot, or for good after `raspi-provision overlay-commit`.
-sessions give their applications a home of their own, `~/.behead` of
-whoever runs behead unless `BEHEAD_HOME` names another, so kodi under
-behead keeps its settings apart from your own. on the pi the service sets
-`BEHEAD_HOME=/var/lib/behead`, which the image lists in `/etc/persist.d` so
-it survives reboots as `/home` does.
-
-kodi plays what is in `/home/behead/media`: copy films and shows to
-`/home/behead/media/videos` and music to `/home/behead/media/music`, for
-example with `scp` as root. `kodi.sh` creates both directories and gives a
-kodi without sources the two as its sources, so they are under Videos >
-Files and Music > Files from the first start. they are in the library as
-well, under Movies and Music, a moment after each start of the session:
-`kodi-library.py` names every video after its file, "Title (Year).mkv"
-being the form kodi asks for, in a `.nfo` it writes beside the file, since
-the pi has no internet to look films up with. a `.nfo` of your own is kept.
-files copied while kodi runs appear at the next start.
-
-`SESSION=launcher` is the launcher described below, with its music player.
-it plays what is in `/home/behead/media/music`, the same files kodi plays,
-needs no packages beyond the demo's, and reads the directory when it
-starts, so music copied later is there after `systemctl restart behead`.
-the directory is `BEHEAD_MEDIA` in `behead.service`; sources added or
-changed in kodi are kept.
-
-`SESSION=waydroid` also adds debian's backports as an apt source, since
-stable has no waydroid package, and puts android's system and vendor images
-in the image, 2.4 GB, where `waydroid init` finds them and downloads
-nothing. `tools/fetch-waydroid.py` fetches them once, about 1 GB, into
-`~/.cache/behead/waydroid`, checked against the hashes waydroid's update
-channel lists. the newest f-droid and osmand~ apks, from
-`tools/fetch-fdroid.py`, are written into the image's copy of the system
-image by `tools/preinstall-apks.py`, so android starts with both apps.
-`waydroid.sh` sets waydroid up from the images at the first session after
-each boot; android keeps its data under `/var/lib/behead`. the
-image boots with `psi=1`, because android does not start on a kernel with
-pressure stall information off, as the pi's is by default. if android stays
-black, `waydroid status` on the pi says whether its container is running.
-
-the service offers the car every `NAME.crt` and `NAME.key` pair in
-`/etc/behead/certs`, in name order, until one is accepted: Google's first
-when it has been extracted, then a self-signed pair the image always carries:
-see [docs/certificates.md](docs/certificates.md#on-the-rpi4).
-
-the usb-c port also powers the pi. a headunit port may not supply what a pi 4
-needs under load; power it through the gpio header if it browns out.
-
-## esp32-p4
-
-`esp32` holds firmware that makes an esp32-p4 the phone, showing the
-launcher below through the chip's own h.264 encoder, with the music of a
-microsd card as the car's sound. it runs on a board, at up to 1280x720 and
-30 pictures a second, and an earlier build has shown the demo in a van:
-
-    make build-esp32     # needs espressif's rust toolchain, from espup
-    make flash-esp32     # write it to a board on usb
-    make monitor-esp32   # show what the board logs
-    make test-device DEVICE=esp32   # laptop as headunit, against the board
-
-`ESP32_PORT=full` puts the phone on the chip's full speed usb port.
-
-the card is fat32 (not exfat, which larger cards come as), with mp3, flac,
-opus and wav files in folders or not, and has to be in the board when it
-starts.
-
-see [esp32/README.md](esp32/README.md) for what it needs and what it lacks.
-
-## launcher
-
-`behead-launcher` is a video source like `behead-demo`, made for the car: a
-home screen of tiles in two rows of three, of which three are taken: MUSIC,
-MAP and INPUTS. it is what the esp32-p4
-firmware shows, a session of the pi image (`make image-rpi
-SESSION=launcher`), and runs on any linux through its session script,
-which plays `~/Music`, or `$BEHEAD_MEDIA/music`, and draws the maps in a
-`maps` folder beside it:
-
-    behead --cert phone.crt --key phone.key \
-        --video-cmd 'sessions/launcher.sh {width} {height} {fps}' \
-        --audio-cmd 'sessions/launcher.sh --audio {rate} {channels}'
-
-the script pipes the launcher's pictures into ffmpeg, and its sound through
-a named pipe to the audio command. `behead-launcher` has to be on the path.
-
-- MUSIC lists the folders and the mp3, flac, opus and wav files under `--music`,
-  by file name. a touch on a folder opens it, and on a track plays it, or
-  pauses the one playing. tracks follow each other in the order listed, on
-  into the next folder. BACK leaves a folder, UP and DOWN move the list a
-  page, and PREV, PLAY or PAUSE and NEXT are under it.
-- MAP draws the roads, the water and the street names around the car, from
-  the `.bmap` files under `--maps`, with no network: it shows and follows
-  where the car's sensor says it is, and neither searches nor finds a route.
-  a turn of the knob, or + and -, makes it closer or wider, a finger moves
-  it, and a click or HERE has it back around the car. a map is made on
-  another machine, of an area by its west, south, east and north edges in
-  degrees, from openstreetmap's data, whose contributors it is owed to:
-
-      tools/fetch-map.py san-francisco.bmap -122.52,37.70,-122.35,37.83
-      tools/fetch-map.py world.bmap world
-
-  san francisco is under a megabyte, nashville and what is around it under
-  three. the second is a map of the whole world, half a megabyte of its
-  land and lakes from natural earth, which the launcher draws under the
-  others and alone where it has no other: coarse, a shore a few kilometres
-  out of place when seen from close, but there at any size, out to the
-  whole world on the screen. without it a map has no sea, and its land
-  ends where its roads do.
-- INPUTS is the demo's screen, for trying a car's controls.
-- without a touchscreen: the knob moves along the tiles and the list, and
-  makes the map closer or wider. a car's four arrows go to the tile that
-  way, up and down the list, and move the map a quarter of the screen. a
-  click chooses, the car's back button leaves a folder or a screen, and
-  home returns to the tiles. the car's play, pause, next and previous keys
-  work on every screen.
-
-names are shown in capitals, with digits and common punctuation. a letter
-with an accent or another mark is shown without it, as far as the latin of
-europe and vietnamese go: RÜFÜS is RUFUS. other characters, those of other
-scripts among them, show as blanks. a name too long for its place slides
-to its end and back: the line the knob is on, and the title of what plays.
+- **touch / touchpad**: `<touch|touchpad> <action> <action-index> <id>:<x>,<y> ...`
+  listing every active pointer (`touchpad` uses the pad's own coordinates).
+- **buttons and controls**: Android key codes (`button <code> <down|up>`).
+  rotary knob code is `65536` (`relative 65536 <detents>`); tilts are d-pad
+  `19..22`, click is `23`. `absolute <code> <value>` reports sliders.
+- **unknowns**: unread input/sensor fields (`unknown <input|sensor> <ch> field <num> <hex>`)
+  and unhandled messages (`unknown message <ch> <id> <hex>`, up to 32 bytes)
+  are printed so new car controls can be inspected. stderr logs each input
+  channel's advertised keys and surfaces on connect.
+- **sensors** (missing values print as `-`):
+  - `location <lat> <lon> <accuracy> <altitude> <speed> <bearing>` (degrees,
+    metres, speed, degrees)
+  - `compass <bearing> <pitch> <roll>` (degrees), `speed <speed>` (raw/1000:
+    m/s per Google's schema, knots in OpenAuto)
+  - `night <0|1>`, `parking-brake <0|1>`
+  - `driving <bits>` (`0` unrestricted; `1` no video, `2` no keyboard, `4` no
+    voice, `8` no setup, `16` short messages)
+  - `gear <n>` (`0` neutral, `1..10` gears, `100` drive, `101` park, `102`
+    reverse)
+  - `rpm`, `odometer <total> <trip>`, `fuel <level> <range> <low>`,
+    `environment <temp> <pressure> <rain>` (raw values; units unconfirmed)
 
 ## test
 
-    make test-e2e    # tcp, no root
-    make vm          # create the test vm, once
-    make test-vm     # usb gadget, pi service, openauto and desktop tests in the vm
-    make test-dhu    # Google's DHU over TCP, after `make dhu`
-    make test-device               # laptop as headunit, against a pi on a usb cable
-    make test-device DEVICE=esp32  # the same against an esp32-p4
+    make precommit                 # fmt, clippy, unit tests, and TCP e2e tests
+    make test-e2e                  # TCP e2e tests (no root)
+    make vm && make test-vm        # USB gadget, RPi4 service, OpenAuto, and desktop tests in VM
+    make test-dhu                  # Google's DHU over TCP (after `make dhu`)
+    make test-device               # laptop as headunit against a cabled RPi4
+    make test-device DEVICE=esp32  # laptop as headunit against a cabled ESP32-P4
 
-the tests run headless. `HEADED=1` shows what the scripted headunit
-receives, live in the browser, which opens by itself (`OPEN=` to not), and
-`TESTS` picks what to run:
+tests run headless by default. pass `HEADED=1` to watch live in a browser
+(`OPEN=` to skip opening it) and `TESTS=` to filter:
 
     make test-vm HEADED=1 TESTS=test_phosh
 
-`make test-device` needs the udev rule in `tests/device/70-behead.rules`
-installed on the laptop, and the device's usb port cabled to it. it also
-prints the device's touch to picture latency. with `DEVICE=esp32 SOAK=600`
-it also plays the card's music for that many seconds and fails if sound or
-pictures fall behind, which is the test for a stall that takes minutes.
-
-`make headunit` makes the browser the headunit of whatever device is on
-the cable, a pi or an esp32-p4: its video on a page,
-which opens by itself, and the mouse on the picture as a finger. the mouse
-wheel turns a rotary knob, and so do page up and page down, a detent a
-press and on while held; the arrow keys tilt it and enter clicks it;
-escape is back and the home key is home. the rest of the keyboard types:
-letters, digits, punctuation and shift go to the device as a keyboard's
-keys, for a session that takes them (`--uinput`). ctrl-c stops it. the page plays the device's
-media audio too, from the first click or key on it, which a browser waits
-for before it makes a sound. the same goes for the page behind `HEADED=1`.
-
-three tests check the phone certificate the way a strict car would, against
-Google's Automotive Link root, and skip unless given it: see
-[docs/certificates.md](docs/certificates.md#testing-against-googles-root).
+- `make test-device` requires `tests/device/70-behead.rules` on the laptop
+  and reports touch-to-picture latency. pass `DEVICE=esp32 SOAK=600` to soak
+  test ESP32-P4 audio and video for 600 seconds.
+- three certificate tests check against Google's Automotive Link root and
+  skip unless env vars are provided: see
+  [docs/certificates.md](docs/certificates.md#testing-against-googles-root).

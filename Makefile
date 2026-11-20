@@ -114,10 +114,8 @@ ESP32_MAPS ?=
 ESP32_BUILT_IN_MAPS := $(ESP32_DIR)/maps
 
 # `make clean-build`: cargo's own target (cargo clean), the firmware's, both
-# chips', and what image-rpi and build-esp32 copy out of them. rpi's
-# behead-launcher is tracked, so it stays
-CLEAN_BUILD := $(ESP32_DIR)/target $(ESP32_BUILT_IN_MAPS) \
-	$(RPI_DIR)/overlay/usr/local/bin/behead $(RPI_DIR)/overlay/usr/local/bin/behead-demo
+# chips', and what image-rpi and build-esp32 copy out of them
+CLEAN_BUILD := $(ESP32_DIR)/target $(ESP32_BUILT_IN_MAPS) $(RPI_BINS:%=$(RPI_DIR)/overlay/usr/local/bin/%)
 # `make clean-intermediates`: these cargo targets less the files at the top of
 # each release/ dir, the pi binaries and firmware that image-rpi and flash-esp32
 # read. the next build compiles every crate again

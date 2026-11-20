@@ -77,9 +77,11 @@ and music are free to run on either core.
 5. video: setup request (h.264 baseline), wait for setup response and video
    focus, send start, then one access unit per media message
 6. input: binding request for the advertised keycodes, then input events arrive
-7. media audio: setup request (pcm), then an audio focus request on the
-   control channel. start once the headunit grants focus, stop when it takes
-   focus back, which it may do unprompted
+7. media audio: setup request (pcm), then wait until the audio source actually
+   produces sound before asking for focus on the control channel. start once
+   the headunit grants focus, stop and release focus after sustained silence so
+   the car's radio can resume, or stop if the headunit takes focus back
+   unprompted
 8. microphone: as on a phone, opened for a voice session alone. the voice
    key (84) sends a microphone open request, and pressing it again, or the
    `--mic-cmd` command exiting, sends one to close it. no setup request:
@@ -242,9 +244,11 @@ captured, encoded, and decoded by the car, while sound is only recorded.
 car, so it is a setting, `AUDIO_DELAY` in a session's `.env`, and kodi's
 150 ms is a guess by ear still to be measured.
 
-media audio is opened only with `--audio-cmd`, because asking for audio focus
-silences the car's own sound. guidance (speech) and system audio channels are
-not opened yet.
+media audio is opened only with `--audio-cmd`, and audio focus is claimed only
+once the command produces non-silent pcm and released after two seconds of
+silence (or quiet), so a silent session leaves the car's own radio playing.
+the firmware does the same directly from the launcher's player state. guidance
+(speech) and system audio channels are not opened yet.
 
 `--mic-cmd` reads the headunit microphone, one run of it for each voice
 session: it starts when the voice key opens the microphone and is stopped
@@ -514,6 +518,16 @@ speed and 512 at high speed, as the android kernel's accessory driver does.
    device), and treating that as an unplug made the first test on a real
    rpi fail intermittently
 
+with `--functionfs` a daemon managing the port, such as usb-signaller on a
+Linux phone, owns the gadget and shares the controller with its other
+functions. the server opens the endpoints in its functionfs mount and writes
+the descriptors, and the owner binds the controller after that. steps 1 to 3
+would mean re-enumerating a gadget that is not ours, so the owner shows
+18d1:2d00 from the start, the way a phone already in accessory mode does,
+and headunits take such a device as it is. the server still waits for the
+headunit to configure the function before each session, and leaves the
+gadget alone when it ends.
+
 a write that fills its last usb packet exactly is followed by a zero length
 packet, sized for the speed the link negotiated (64 bytes full speed, 512
 high speed). without it a host reading into a larger buffer, as headunits
@@ -533,7 +547,8 @@ manual `behead teardown`, removes it.
 1. `make test-vm`: the same session tests over usb inside an incus vm
    (`incant.yaml`). the kernel `dummy_hcd` controller loops the gadget back
    to a host port in the same vm, and the test plays the headunit through
-   pyusb, including the accessory switch, unplug, teardown and crash recovery.
+   pyusb, including the accessory switch, unplug, teardown and crash recovery,
+   and `--functionfs` in a gadget the test sets up as a daemon owning it would.
 2. `make test-device`: the laptop plays the headunit, through the same scripted
    headunit and pyusb, against a flashed rpi4 on a usb cable. checks that
    video decodes and arrives at a steady 30 frames per second, at 480p and

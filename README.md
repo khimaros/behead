@@ -78,7 +78,9 @@ then pick one:
 - `--audio-cmd`: shell command writing signed 16 bit little endian pcm to
   stdout, in real time, played as the headunit's media audio. `{rate}`,
   `{bits}` and `{channels}` are replaced with the headunit's format, usually
-  48000 hz stereo. without it the car keeps its own audio focus
+  48000 hz stereo. audio focus is claimed only while the command produces
+  non-silent audio and released after two seconds of silence, so the car's
+  own radio keeps playing when nothing is playing
 - `--audio-delay`: milliseconds to hold that audio back. a picture takes
   longer to reach the car's screen than sound its speakers, so without a
   delay the sound of a film runs ahead of it. on the pi it is `AUDIO_DELAY`
@@ -93,6 +95,12 @@ then pick one:
   a usb device controller from `/sys/class/udc`, or `auto` for the first
   one. needs root and a machine with a device controller, such as the usb-c
   port of an rpi4
+- `--functionfs`: be the android auto function of a usb gadget another
+  daemon owns, such as [usb-signaller](https://codeberg.org/DylanVanAssche/usb-signaller)
+  on a Linux phone, instead of building one. takes the directory its
+  functionfs is mounted on. the owner gives the gadget the accessory ids
+  `18d1:2d00` from the start and binds the controller once the server has
+  started. implies `--usb auto`
 - `--uinput`: also turn touch and buttons into kernel input devices named
   `behead touchscreen` and `behead keys`, so applications on a wayland
   compositor receive them directly. needs write access to `/dev/uinput`.
@@ -130,7 +138,8 @@ then pick one:
 
 in usb mode the server creates the kernel gadget on start and removes it on
 SIGINT or SIGTERM. if it was killed before it could, `behead teardown`
-removes what was left.
+removes what was left. with `--functionfs` the gadget stays as its owner
+left it.
 
 touch, button and control events from the headunit are printed to stdout:
 

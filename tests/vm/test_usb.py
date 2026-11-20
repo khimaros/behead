@@ -3,7 +3,9 @@ dummy controller loops the server's gadget back to a host port. the test
 plays the headunit: it performs the android open accessory switch, then
 runs every tcp session test over the bulk endpoints."""
 
+import os
 import pathlib
+import select
 import signal
 import subprocess
 import sys
@@ -20,6 +22,11 @@ INITIAL_ID = (0x12D1, 0x107E)
 ACCESSORY_ID = (0x18D1, 0x2D00)
 GADGET_DIR = pathlib.Path("/sys/kernel/config/usb_gadget/behead")
 FFS_MOUNT = pathlib.Path("/run/behead-ffs")
+# a gadget another daemon owns, as usb-signaller does on a phone
+OWNER_GADGET = pathlib.Path("/sys/kernel/config/usb_gadget/owner")
+OWNER_FFS = pathlib.Path("/run/owner-ffs")
+OWNER_FUNCTION = "ffs.owner"
+UDC_CLASS = pathlib.Path("/sys/class/udc")
 MODULES = ["dummy_hcd", "libcomposite"]
 VENDOR_IN, VENDOR_OUT = 0xC0, 0x40
 AOA_GET_PROTOCOL, AOA_SEND_STRING, AOA_START = 51, 52, 53
@@ -190,6 +197,112 @@ class UsbTest(tcp.SessionTest):
     def test_restarts_over_a_stale_gadget(self):
         tcp.SessionTest.stop_server(self)
         self.start_server()
+        headunit = self.connect()
+        headunit.run_until(lambda: len(headunit.frames) == tcp.FRAME_COUNT)
+
+
+class OwnedGadget:
+    """what a daemon managing the port sets up for the server: a gadget that
+    already shows the accessory ids, with a functionfs function mounted. it
+    binds the controller once the server has written its descriptors"""
+
+    def __init__(self):
+        self.remove()
+        for directory in ["strings/0x409", f"functions/{OWNER_FUNCTION}", "configs/c.1"]:
+            (OWNER_GADGET / directory).mkdir(parents=True, exist_ok=True)
+        (OWNER_GADGET / "idVendor").write_text(f"{ACCESSORY_ID[0]:#06x}")
+        (OWNER_GADGET / "idProduct").write_text(f"{ACCESSORY_ID[1]:#06x}")
+        (OWNER_GADGET / "configs/c.1" / OWNER_FUNCTION).symlink_to(OWNER_GADGET / "functions" / OWNER_FUNCTION)
+        OWNER_FFS.mkdir(exist_ok=True)
+        subprocess.run(["mount", "-t", "functionfs", OWNER_FUNCTION.split(".")[1], OWNER_FFS], check=True)
+
+    def bind(self):
+        (OWNER_GADGET / "UDC").write_text(next(UDC_CLASS.iterdir()).name)
+
+    def unbind(self):
+        (OWNER_GADGET / "UDC").write_text("\n")
+
+    def remove(self):
+        """take down whatever of the gadget is there, as its owner would"""
+        udc = OWNER_GADGET / "UDC"
+        if udc.exists() and udc.read_text().strip():
+            self.unbind()
+        if str(OWNER_FFS) in pathlib.Path("/proc/mounts").read_text():
+            subprocess.run(["umount", OWNER_FFS], check=True)
+        (OWNER_GADGET / "configs/c.1" / OWNER_FUNCTION).unlink(missing_ok=True)
+        for directory in ["configs/c.1", f"functions/{OWNER_FUNCTION}", "strings/0x409", ""]:
+            if (OWNER_GADGET / directory).exists():
+                (OWNER_GADGET / directory).rmdir()
+        if OWNER_FFS.exists():
+            OWNER_FFS.rmdir()
+
+
+class FunctionfsTest(tcp.ServerTest):
+    """the server as the android auto function of a gadget it does not own"""
+
+    TRANSPORT_ARGS = ["--functionfs", str(OWNER_FFS)]
+    READY = "usb gadget ready"
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        subprocess.run(["modprobe", "-a", *MODULES], check=True)
+
+    def setUp(self):
+        self.gadget = OwnedGadget()
+        self.addCleanup(self.gadget.remove)
+        super().setUp()
+
+    def start_server(self, video_cmd=None, credentials=None, options=()):
+        super().start_server(video_cmd, credentials, options)
+        self.gadget.bind()
+
+    def open_link(self):
+        return UsbLink(switch_to_accessory())
+
+    def expect_closed(self, headunit):
+        """usb has no close to observe; a finished session leaves the link up"""
+
+    def unread_log(self):
+        """what the server has logged since it was last read, without waiting"""
+        seen = b""
+        while select.select([self.server.stderr], [], [], 0)[0]:
+            chunk = os.read(self.server.stderr.fileno(), 4096)
+            if not chunk:
+                break
+            seen += chunk
+        return seen.decode()
+
+    def test_streams_video(self):
+        headunit = self.connect()
+        headunit.run_until(lambda: len(headunit.frames) == tcp.FRAME_COUNT)
+
+    def test_leaves_the_gadget_to_its_owner(self):
+        """the owner shows the accessory ids itself, and the server never
+        builds a gadget of its own nor takes the owner's apart. the kernel
+        unbinds the owner's gadget once the server's functionfs files close,
+        and the owner binds it again for the next server"""
+        self.connect()
+        self.assertFalse(GADGET_DIR.exists(), "the server built a gadget of its own")
+        self.server.send_signal(signal.SIGTERM)
+        self.assertEqual(self.server.wait(timeout=USB_TIMEOUT), 0)
+        self.assertTrue((OWNER_GADGET / "configs/c.1" / OWNER_FUNCTION).exists(), "the owner's gadget was taken apart")
+        self.assertIn(str(OWNER_FFS), pathlib.Path("/proc/mounts").read_text())
+        wait_for(lambda: not find(ACCESSORY_ID), "the owner's gadget to leave the bus")
+        tcp.ServerTest.stop_server(self)
+        self.start_server()
+        headunit = self.connect()
+        headunit.run_until(lambda: len(headunit.frames) == tcp.FRAME_COUNT)
+
+    def test_waits_for_the_headunit_to_come_back(self):
+        """after an unplug the server waits for the next headunit, rather than
+        retrying sessions on a function nobody is connected to"""
+        usb.util.dispose_resources(switch_to_accessory())
+        self.read_output(self.server.stderr, b"headunit connected")
+        self.gadget.unbind()
+        time.sleep(UNPLUG_GRACE * 2)
+        self.assertLessEqual(self.unread_log().count("headunit connected"), 1, "sessions retried while unplugged")
+        self.gadget.bind()
         headunit = self.connect()
         headunit.run_until(lambda: len(headunit.frames) == tcp.FRAME_COUNT)
 

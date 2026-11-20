@@ -174,19 +174,35 @@ impl Gadget {
         let gadget = Path::new(GADGET);
         context(std::os::unix::fs::symlink(gadget.join(FUNCTION), gadget.join(CONFIG_LINK)), "linking function")?;
         mount_functionfs()?;
+        Self::open(Path::new(FFS_MOUNT), udc, true)
+    }
+
+    /// serve the functionfs mounted at `mount`, in a gadget a daemon managing
+    /// the port owns. the owner binds the controller once the descriptors are
+    /// written, and shows the accessory ids from the start, since the
+    /// accessory switch would mean re-enumerating a gadget that is not ours
+    pub fn attach(mount: &Path, udc: Option<&str>) -> Result<Self, String> {
+        Self::open(mount, udc.map_or_else(find_udc, |name| Ok(name.to_string()))?, false)
+    }
+
+    /// open the endpoints at `mount` and serve its control requests,
+    /// switching the gadget to accessory mode when it is `owned`
+    fn open(mount: &Path, udc: String, owned: bool) -> Result<Self, String> {
         let endpoint = |name: &str| {
-            let path = Path::new(FFS_MOUNT).join(name);
+            let path = mount.join(name);
             context(OpenOptions::new().read(true).write(true).open(&path), &format!("opening {}", path.display()))
         };
         let mut ep0 = endpoint("ep0")?;
         context(ep0.write_all(&descriptors()), "writing usb descriptors")?;
         context(ep0.write_all(&strings()), "writing usb strings")?;
         let (to_host, from_host) = (endpoint("ep1")?, endpoint("ep2")?);
-        enumerate(&udc, INITIAL_ID)?;
+        if owned {
+            enumerate(&udc, INITIAL_ID)?;
+        }
         let live = Live::default();
-        let (control_live, control_udc) = (live.clone(), udc.clone());
+        let (control_live, control_udc) = (live.clone(), owned.then(|| udc.clone()));
         std::thread::spawn(move || {
-            if let Err(e) = control_loop(ep0, &control_udc, &control_live) {
+            if let Err(e) = control_loop(ep0, control_udc.as_deref(), &control_live) {
                 eprintln!("usb control: {e}");
                 std::process::exit(1);
             }
@@ -247,14 +263,18 @@ fn readable_within(file: &File, timeout_ms: i32) -> bool {
 /// fall back to the initial identity when the headunit goes away. a disable
 /// ends the session at once but only counts as an unplug if no enable follows
 /// within the grace period: hosts reset, reconfigure and reauthorize devices
-/// they go on using.
-fn control_loop(mut ep0: File, udc: &str, live: &Live) -> Result<(), String> {
-    let (mut accessory, mut unplugged) = (false, false);
+/// they go on using. without the `udc` of a gadget of our own there is no
+/// identity to switch: the gadget is an accessory throughout.
+fn control_loop(mut ep0: File, udc: Option<&str>, live: &Live) -> Result<(), String> {
+    let (mut accessory, mut unplugged) = (udc.is_none(), false);
     let mut events = [0; FFS_EVENT_LEN * FFS_EVENT_BATCH];
     loop {
         if unplugged && !readable_within(&ep0, UNPLUG_GRACE_MS as i32) {
-            (accessory, unplugged) = (false, false);
-            enumerate(udc, INITIAL_ID)?;
+            unplugged = false;
+            if let Some(udc) = udc {
+                accessory = false;
+                enumerate(udc, INITIAL_ID)?;
+            }
             continue;
         }
         let n = context(ep0.read(&mut events), "reading usb events")?;
@@ -264,7 +284,7 @@ fn control_loop(mut ep0: File, udc: &str, live: &Live) -> Result<(), String> {
                 EVENT_SETUP => match on_setup(&mut ep0, event)? {
                     Reply::Start(_) if !accessory => {
                         accessory = true;
-                        enumerate(udc, ACCESSORY_ID)?;
+                        udc.map_or(Ok(()), |udc| enumerate(udc, ACCESSORY_ID))?;
                     }
                     Reply::Release => release(),
                     _ => {}

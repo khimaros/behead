@@ -115,7 +115,8 @@ class LauncherCase(tcp.ServerTest):
         self.start_server(video, options=["--audio-cmd", audio])
         self.addCleanup(self.stop_server)
         self.headunit = self.connect(keycodes=(fakehu.HOME, fakehu.BACK, fakehu.DPAD_CENTER, fakehu.ROTARY))
-        self.headunit.run_until(lambda: len(self.headunit.frames) >= WARMUP_FRAMES and self.headunit.audio)
+        self.headunit.run_until(lambda: len(self.headunit.frames) >= WARMUP_FRAMES
+                                and self.headunit.received(fakehu.MEDIA_AUDIO_CHANNEL, fakehu.SETUP_REQUEST))
 
     def tap(self, spot):
         x, y = spot
@@ -139,9 +140,6 @@ class LauncherCase(tcp.ServerTest):
     def assert_pitch(self, pitch):
         heard = tcp.tone_frequency(self.listen(), fakehu.MEDIA_RATE, fakehu.MEDIA_CHANNELS)
         self.assertAlmostEqual(heard, pitch, delta=PITCH_TOLERANCE)
-
-    def assert_silent(self):
-        self.assertEqual(set(self.listen()), {0})
 
     def picture(self):
         """the latest picture the car got, as rgb"""
@@ -183,14 +181,20 @@ class LauncherSessionTest(LauncherCase):
 
 class LauncherTest(LauncherCase):
     def test_plays_and_pauses_a_track_by_touch(self):
-        self.assert_silent()
+        self.assertEqual(self.headunit.received(0, fakehu.AUDIO_FOCUS_REQUEST), [])
+        self.assertIsNone(self.headunit.audio_session)
         self.tap(MUSIC_TILE)
         self.tap(SECOND_LINE)
         self.assert_pitch(WAV_PITCH)
         self.tap(PLAY_PAUSE)
-        self.assert_silent()
+        self.headunit.run_until(lambda: len(self.headunit.received(0, fakehu.AUDIO_FOCUS_REQUEST)) == 2)
+        self.assertIsNone(self.headunit.audio_session)
+        requests = [dict(fakehu.parse(body))[1] for body in self.headunit.received(0, fakehu.AUDIO_FOCUS_REQUEST)]
+        self.assertEqual(requests, [fakehu.FOCUS_GAIN, fakehu.FOCUS_RELEASE])
         self.tap(PLAY_PAUSE)
         self.assert_pitch(WAV_PITCH)
+        requests = [dict(fakehu.parse(body))[1] for body in self.headunit.received(0, fakehu.AUDIO_FOCUS_REQUEST)]
+        self.assertEqual(requests, [fakehu.FOCUS_GAIN, fakehu.FOCUS_RELEASE, fakehu.FOCUS_GAIN])
 
     def test_plays_mp3_flac_and_opus_from_a_folder_by_the_knob_and_keys(self):
         """a car without a touchscreen: a click opens the tile the knob is

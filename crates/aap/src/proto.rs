@@ -63,6 +63,7 @@ pub const AUDIO_TYPE_MEDIA: i32 = 3;
 pub const CODEC_PCM: u32 = 1;
 pub const CODEC_H264_BP: u32 = 3;
 pub const AUDIO_FOCUS_GAIN: i32 = 1;
+pub const AUDIO_FOCUS_RELEASE: i32 = 4;
 /// audio focus states the headunit grants. playing continues while ducked
 /// (LOSS_TRANSIENT_CAN_DUCK), which is the headunit's to apply.
 pub const AUDIO_FOCUS_PLAYABLE: [i32; 4] = [1, 2, 4, 6];

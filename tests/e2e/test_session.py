@@ -36,6 +36,20 @@ TONE_CMD = (f"ffmpeg -loglevel error -f lavfi -i sine=frequency={TONE}:sample_ra
             "-ac {channels} -f s16le -")
 # the same at the speed it is heard, as a sound card records
 REALTIME_TONE_CMD = TONE_CMD.replace("ffmpeg ", "ffmpeg -re ", 1)
+SILENT_CMD = "ffmpeg -loglevel error -re -f lavfi -i anullsrc=r={rate} -ac {channels} -f s16le -"
+# silence, a burst of tone, enough silence to release focus, then tone again
+INTERMITTENT_TONE = f"""
+import math, struct, sys, time
+rate, channels = int(sys.argv[1]), int(sys.argv[2])
+packet = rate * 40 // 1000
+silence = bytes(packet * channels * 2)
+tone = b"".join(struct.pack("<h", int(8000 * math.sin(2 * math.pi * {TONE} * n / rate))) * channels for n in range(packet))
+for chunk, count in ((silence, 15), (tone, 20), (silence, 65), (tone, 25)):
+    for _ in range(count):
+        sys.stdout.buffer.write(chunk)
+        sys.stdout.buffer.flush()
+        time.sleep(0.04)
+"""
 AUDIO_SECONDS = 1
 AUDIO_DELAY_MS = 1000
 # how much sooner than the delay the first sound may arrive, measured from
@@ -788,12 +802,56 @@ class SessionTest(ServerTest):
         pcm = b"".join(data for _, data in headunit.audio)
         self.assertAlmostEqual(tone_frequency(pcm, fakehu.MEDIA_RATE, fakehu.MEDIA_CHANNELS), TONE, delta=TONE_TOLERANCE)
 
+    def test_does_not_claim_audio_focus_while_silent(self):
+        """a silent session leaves the car's own radio playing"""
+        self.restart_server(options=["--audio-cmd", SILENT_CMD])
+        headunit = self.connect()
+        headunit.run_until(lambda: len(headunit.frames) == FRAME_COUNT
+                           and headunit.received(fakehu.MEDIA_AUDIO_CHANNEL, fakehu.SETUP_REQUEST))
+        headunit.send(0, fakehu.PING_REQUEST, fakehu.field(1, 1))
+        headunit.run_until(lambda: headunit.received(0, fakehu.PING_RESPONSE))
+        self.assertEqual(headunit.received(0, fakehu.AUDIO_FOCUS_REQUEST), [])
+        self.assertIsNone(headunit.audio_session)
+        self.assertEqual(headunit.audio, [])
+
+    def test_requests_and_releases_audio_focus_with_sound(self):
+        """focus is claimed once sound starts, released after silence, and
+        claimed again when sound returns"""
+        script = self.dir / "intermittent.py"
+        script.write_text(INTERMITTENT_TONE)
+        self.restart_server(options=["--audio-cmd", f"python3 {script} {{rate}} {{channels}}"])
+        headunit = self.connect()
+        headunit.run_until(lambda: len(headunit.received(0, fakehu.AUDIO_FOCUS_REQUEST)) == 3)
+        requests = [dict(fakehu.parse(body))[1] for body in headunit.received(0, fakehu.AUDIO_FOCUS_REQUEST)]
+        self.assertEqual(requests, [fakehu.FOCUS_GAIN, fakehu.FOCUS_RELEASE, fakehu.FOCUS_GAIN])
+        headunit.run_until(lambda: len(headunit.received(0, fakehu.AUDIO_FOCUS_REQUEST)) == 4)
+        self.assertIsNone(headunit.audio_session)
+        requests = [dict(fakehu.parse(body))[1] for body in headunit.received(0, fakehu.AUDIO_FOCUS_REQUEST)]
+        self.assertEqual(requests, [fakehu.FOCUS_GAIN, fakehu.FOCUS_RELEASE, fakehu.FOCUS_GAIN, fakehu.FOCUS_RELEASE])
+
+    def test_releases_audio_focus_when_command_goes_quiet(self):
+        """an audio command that stops writing without exiting still releases
+        audio focus after the silence timeout"""
+        burst = (f"ffmpeg -loglevel error -re -f lavfi -i sine=frequency={TONE}:sample_rate={{rate}}:duration=0.4 "
+                 "-ac {channels} -f s16le -; exec sleep 60")
+        self.restart_server(options=["--audio-cmd", burst])
+        headunit = self.connect()
+        headunit.run_until(lambda: headunit.audio)
+        headunit.run_until(lambda: len(headunit.received(0, fakehu.AUDIO_FOCUS_REQUEST)) == 2)
+        self.assertIsNone(headunit.audio_session)
+        requests = [dict(fakehu.parse(body))[1] for body in headunit.received(0, fakehu.AUDIO_FOCUS_REQUEST)]
+        self.assertEqual(requests, [fakehu.FOCUS_GAIN, fakehu.FOCUS_RELEASE])
+
     def test_stops_media_audio_when_the_car_takes_focus(self):
         self.restart_server(options=["--audio-cmd", TONE_CMD])
         headunit = self.connect()
         headunit.run_until(lambda: headunit.audio)
         headunit.take_audio_focus()
         headunit.run_until(lambda: headunit.audio_session is None)
+        headunit.send(0, fakehu.PING_REQUEST, fakehu.field(1, 2))
+        headunit.run_until(lambda: headunit.received(0, fakehu.PING_RESPONSE))
+        self.assertIsNone(headunit.audio_session)
+        self.assertEqual(headunit.received(0, fakehu.AUDIO_FOCUS_REQUEST), [fakehu.field(1, fakehu.FOCUS_GAIN)])
 
     def press_voice_key(self, headunit):
         """the driver asks to speak, once the session is up and the

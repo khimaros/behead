@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 const USAGE: &str =
     "usage: behead (--cert FILE --key FILE | --cert-dir DIR)... --video-cmd CMD [--audio-cmd CMD] [--mic-cmd CMD]
-              [--audio-delay MS] [--usb UDC | --listen ADDR] [--uinput] [--knob KEYS]
+              [--audio-delay MS] [--usb UDC] [--functionfs DIR] [--listen ADDR] [--uinput] [--knob KEYS]
               [--back KEY] [--nmea-socket PATH] [--max-height LINES]
        behead teardown
 
@@ -43,7 +43,12 @@ const USAGE: &str =
                    with the same replacements
   --usb UDC       appear to the headunit as a usb device on this controller,
                    or on the first one found when UDC is 'auto'. needs root
-  --listen ADDR    tcp address to accept the headunit on (default 127.0.0.1:5277)
+  --functionfs DIR  be the android auto function mounted at DIR, of a usb
+                   gadget a daemon managing the port owns. it shows the
+                   accessory ids itself and binds the controller once
+                   the server is ready. implies --usb auto
+  --listen ADDR    tcp address to accept the headunit on (default 127.0.0.1:5277),
+                   unless --usb or --functionfs is given
   --uinput         also deliver touch and buttons as kernel input devices,
                    'behead touchscreen' and 'behead keys'. needs /dev/uinput
   --knob KEYS      what a turn of the car's rotary knob is with --uinput:
@@ -76,7 +81,8 @@ const UNDERFLOW_LOG_INTERVAL: Duration = Duration::from_secs(10);
 const UNDERFLOW: &str = "audio: the headunit ran out of media audio";
 enum Transport {
     Tcp(String),
-    Usb(String),
+    /// the controller, and the functionfs of a gadget another daemon owns
+    Usb(String, Option<PathBuf>),
 }
 
 /// where one or more phone certificates come from, in order of preference
@@ -144,8 +150,8 @@ type Link = behead_link::Link<tls::RustlsTls, Host>;
 type Shared = behead_link::Shared<tls::RustlsTls, Host>;
 
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, String> {
-    let (mut transport, mut credentials, mut cert, mut video_cmd, mut uinput) =
-        (Transport::Tcp(DEFAULT_LISTEN.into()), Vec::new(), None, None, false);
+    let (mut listen, mut usb, mut functionfs) = (DEFAULT_LISTEN.to_string(), None, None);
+    let (mut credentials, mut cert, mut video_cmd, mut uinput) = (Vec::new(), None, None, false);
     let (mut audio_cmd, mut mic_cmd, mut nmea_socket, mut audio_delay) = (None, None, None, Duration::ZERO);
     let (mut knob, mut back, mut max_height) = (vec![uinput::Knob::default()], uinput::Back::default(), None);
     while let Some(flag) = args.next() {
@@ -158,8 +164,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, String> 
         }
         let value = args.next().ok_or(format!("missing value for {flag}"))?;
         match flag.as_str() {
-            "--listen" => transport = Transport::Tcp(value),
-            "--usb" => transport = Transport::Usb(value),
+            "--listen" => listen = value,
+            "--usb" => usb = Some(value),
+            "--functionfs" => functionfs = Some(PathBuf::from(value)),
             "--cert" => cert = Some(PathBuf::from(value)),
             "--key" => {
                 let cert = cert.take().ok_or("--key needs a --cert before it")?;
@@ -195,6 +202,10 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, String> 
         return Err("--cert and --key, or --cert-dir, is required".into());
     }
     let video_cmd = video_cmd.ok_or("--video-cmd is required")?;
+    let transport = match (usb, functionfs) {
+        (None, None) => Transport::Tcp(listen),
+        (udc, functionfs) => Transport::Usb(udc.unwrap_or(AUTO_UDC.into()), functionfs),
+    };
     Ok(Config {
         transport,
         credentials,
@@ -331,14 +342,17 @@ fn handle(shared: &Shared, host: &mut Host, config: &Config, video: &mut Option<
             host.video_input = None;
             video.iter().for_each(video::Source::detach);
         }
-        Event::AudioStarted(format) => {
-            eprintln!("audio started {}hz {} bit {} channels", format.rate, format.bits, format.channels);
+        Event::AudioReady(format) => {
+            host.audio_epoch += 1;
             let command = command::fill(config.audio_cmd.as_deref().unwrap_or_default(), &audio::values(format));
             let (shared, epoch) = (shared.clone(), host.audio_epoch);
             let delay = config.audio_delay;
             std::thread::spawn(move || audio::stream(shared, epoch, command, format, delay));
         }
-        Event::AudioStopped => host.audio_epoch += 1,
+        Event::AudioStarted(format) => {
+            eprintln!("audio started {}hz {} bit {} channels", format.rate, format.bits, format.channels);
+        }
+        Event::AudioStopped => eprintln!("audio stopped"),
         Event::MicrophoneOpened(format) => {
             eprintln!("microphone open {}hz {} bit {} channels", format.rate, format.bits, format.channels);
             let command = command::fill(config.mic_cmd.as_deref().unwrap_or_default(), &audio::values(format));
@@ -441,7 +455,8 @@ fn run_tcp(address: &str, config: &Config, mut credentials: tls::Credentials) ->
 /// on SIGINT or SIGTERM, replace this process with `behead teardown`.
 /// exec closes every endpoint file at once, which the kernel requires
 /// before the gadget can be removed, and gives cleanup a single code path.
-fn teardown_on_signal() {
+/// a gadget another daemon owns is left to it: the server just ends.
+fn end_on_signal(teardown: bool) {
     // SAFETY: the set is initialised by sigemptyset before use, and blocking
     // signals before any thread is spawned makes every thread inherit the mask
     let set = unsafe {
@@ -456,15 +471,27 @@ fn teardown_on_signal() {
         let mut signal = 0;
         // SAFETY: both pointers refer to live locals
         unsafe { libc::sigwait(&set, &mut signal) };
+        if !teardown {
+            std::process::exit(0);
+        }
         let error = Command::new("/proc/self/exe").arg(TEARDOWN_COMMAND).exec();
         eprintln!("cannot run teardown: {error}");
         std::process::exit(1);
     });
 }
 
-fn run_usb(udc: &str, config: &Config, mut credentials: tls::Credentials) -> Result<(), String> {
-    teardown_on_signal();
-    let gadget = gadget::Gadget::create(Some(udc).filter(|&name| name != AUTO_UDC))?;
+fn run_usb(
+    udc: &str,
+    functionfs: Option<&Path>,
+    config: &Config,
+    mut credentials: tls::Credentials,
+) -> Result<(), String> {
+    end_on_signal(functionfs.is_none());
+    let udc = Some(udc).filter(|&name| name != AUTO_UDC);
+    let gadget = match functionfs {
+        Some(mount) => gadget::Gadget::attach(mount, udc)?,
+        None => gadget::Gadget::create(udc)?,
+    };
     eprintln!("usb gadget ready");
     let mut video = None;
     loop {
@@ -484,7 +511,7 @@ fn run() -> Result<(), String> {
     config.nmea_socket.as_deref().map_or(Ok(()), nmea::listen)?;
     match &config.transport {
         Transport::Tcp(address) => run_tcp(address, &config, credentials),
-        Transport::Usb(udc) => run_usb(udc, &config, credentials),
+        Transport::Usb(udc, functionfs) => run_usb(udc, functionfs.as_deref(), &config, credentials),
     }
 }
 

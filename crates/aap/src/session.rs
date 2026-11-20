@@ -120,6 +120,8 @@ pub enum Event {
     Discovered(proto::ServiceDiscoveryResponse),
     VideoStarted(VideoMode),
     VideoStopped,
+    /// the media audio channel is set up and ready to request focus in this format
+    AudioReady(AudioFormat),
     AudioStarted(AudioFormat),
     AudioStopped,
     /// the voice key opened the headunit microphone
@@ -215,6 +217,10 @@ struct Video {
 struct Audio {
     flow: Flow,
     configs: Vec<proto::AudioConfig>,
+    /// whether the phone currently wants media audio focus
+    want_focus: bool,
+    /// whether a focus request is waiting on the headunit's answer
+    pending_focus: bool,
 }
 
 /// the headunit microphone: its channel once open, and whether the phone
@@ -332,6 +338,36 @@ impl<T: Tls> Session<T> {
     /// true when a media audio packet may be sent without exceeding the ack window
     pub fn audio_ready(&self) -> bool {
         self.media.as_ref().is_some_and(|m| m.flow.ready())
+    }
+
+    /// true while media audio is streaming or waiting for the headunit to answer
+    /// a focus request
+    pub fn audio_active(&self) -> bool {
+        self.media.as_ref().is_some_and(|m| m.flow.started || m.pending_focus)
+    }
+
+    /// ask the headunit for media audio focus, once the channel is set up
+    pub fn request_audio_focus(&mut self) -> Result<(), Error> {
+        let Some(media) = self.media.as_mut().filter(|m| m.flow.setup && !m.want_focus) else {
+            return Ok(());
+        };
+        (media.want_focus, media.pending_focus) = (true, true);
+        let request = proto::AudioFocusRequest { focus_type: Some(proto::AUDIO_FOCUS_GAIN) };
+        self.send_proto(CONTROL_CHANNEL, 0, control::AUDIO_FOCUS_REQUEST, &request)
+    }
+
+    /// stop media audio and return focus to the headunit, so the car's own
+    /// sound can resume. returns the events it causes
+    pub fn release_audio_focus(&mut self) -> Result<Vec<Event>, Error> {
+        let mut events = Vec::new();
+        let Some(media) = self.media.as_mut().filter(|m| m.want_focus) else {
+            return Ok(events);
+        };
+        (media.want_focus, media.pending_focus, media.flow.focused) = (false, false, false);
+        self.sync_media(&mut events)?;
+        let request = proto::AudioFocusRequest { focus_type: Some(proto::AUDIO_FOCUS_RELEASE) };
+        self.send_proto(CONTROL_CHANNEL, 0, control::AUDIO_FOCUS_REQUEST, &request)?;
+        Ok(events)
     }
 
     pub fn receive(&mut self, data: &[u8]) -> Result<Vec<Event>, Error> {
@@ -515,7 +551,9 @@ impl<T: Tls> Session<T> {
             control::AUDIO_FOCUS_RESPONSE => {
                 let response: proto::AudioFocusResponse = decode(body)?;
                 if let Some(media) = self.media.as_mut() {
-                    media.flow.focused = proto::AUDIO_FOCUS_PLAYABLE.contains(&response.state.unwrap_or(0));
+                    let playable = proto::AUDIO_FOCUS_PLAYABLE.contains(&response.state.unwrap_or(0));
+                    media.pending_focus = false;
+                    media.flow.focused = playable && media.want_focus;
                     self.sync_media(events)?;
                 }
             }
@@ -542,7 +580,8 @@ impl<T: Tls> Session<T> {
                 self.video = Some(Video { flow, configs: av.video_configs.clone(), ..Video::default() });
             } else if let Some(av) = av.filter(is_media).filter(|_| self.options.media_audio && self.media.is_none()) {
                 let flow = Flow { channel, ..Flow::default() };
-                self.media = Some(Audio { flow, configs: av.audio_configs.clone() });
+                self.media =
+                    Some(Audio { flow, configs: av.audio_configs.clone(), want_focus: false, pending_focus: false });
             } else if let Some(input) = &descriptor.input_channel {
                 self.inputs.push(Input { channel, keycodes: input.supported_keycodes.clone() });
             } else if let Some(source) =
@@ -640,11 +679,13 @@ impl<T: Tls> Session<T> {
     fn on_media(&mut self, id: u16, body: &[u8], events: &mut Vec<Event>) -> Result<(), Error> {
         let media = self.media.as_mut().unwrap();
         match id {
-            // focus is the phone's to request, once the channel can play
+            // focus is requested once sound plays, so a silent phone leaves the car's radio alone
             av::SETUP_RESPONSE => {
                 media.flow.set_up(body)?;
-                let request = proto::AudioFocusRequest { focus_type: Some(proto::AUDIO_FOCUS_GAIN) };
-                self.send_proto(CONTROL_CHANNEL, 0, control::AUDIO_FOCUS_REQUEST, &request)
+                let config =
+                    media.configs.get(media.flow.config as usize).ok_or(Error::Protocol("unknown audio config"))?;
+                events.push(Event::AudioReady(format_of(config)));
+                Ok(())
             }
             av::MEDIA_ACK => media.flow.acked(body),
             av::AUDIO_UNDERFLOW => {

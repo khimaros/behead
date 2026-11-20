@@ -131,23 +131,65 @@ fn stream(shared: Shared, epoch: u64, mode: VideoMode, app: Arc<Mutex<App>>) -> 
     Ok(())
 }
 
-/// send what the player plays as the car's media sound until the stream
-/// stops, a packet at a time and no faster than it is heard
-fn play((shared, epoch, format): Listener, source: &mut Source) {
+fn is_audio_live(shared: &Shared, epoch: u64) -> bool {
+    let link = shared.0.lock().unwrap();
+    !link.closed && link.host.audio_epoch == epoch
+}
+
+fn set_audio_focus(shared: &Shared, epoch: u64, want: bool) -> bool {
+    let mut link = shared.0.lock().unwrap();
+    if link.closed || link.host.audio_epoch != epoch {
+        return false;
+    }
+    if want {
+        let _ = link.session.request_audio_focus();
+    } else {
+        let _ = link.session.release_audio_focus();
+    }
+    let ok = link.flush().is_ok();
+    shared.1.notify_all();
+    ok
+}
+
+/// send what the player plays as the car's media sound while a track is
+/// playing, claiming audio focus on play and releasing it on pause or stop
+fn play((shared, epoch, format): Listener, player: &Player, source: &mut Source) {
     if format.bits != AUDIO_BITS {
         return log::warn!("audio: music is {AUDIO_BITS} bit, and the headunit wants {}", format.bits);
     }
-    let (started, rate) = (Instant::now(), format.rate.max(1) as u64);
+    let rate = format.rate.max(1) as u64;
     let packet = rate as usize * AUDIO_PACKET_MS / 1000;
-    for frames in (0..).step_by(packet) {
+    let (mut active, mut started, mut frames) = (false, Instant::now(), 0u64);
+    while is_audio_live(&shared, epoch) {
+        let playing = player.now().is_some_and(|now| !now.paused);
+        if !playing {
+            if active {
+                set_audio_focus(&shared, epoch, false);
+                active = false;
+            }
+            std::thread::sleep(Duration::from_millis(AUDIO_PACKET_MS as u64));
+            continue;
+        }
+        if !active {
+            if !set_audio_focus(&shared, epoch, true) {
+                break;
+            }
+            (active, started, frames) = (true, Instant::now(), 0);
+        }
         let pcm = source.pcm(format.rate, format.channels, packet);
         let timestamp = frames * MICROS_PER_SECOND / rate;
-        let (live, ready) = (|link: &Link| link.host.audio_epoch == epoch, |link: &Link| link.session.audio_ready());
-        if !send_when_ready(&shared, live, ready, |link| link.session.send_audio(timestamp, &pcm)) {
+        let live = |link: &Link| link.host.audio_epoch == epoch && link.session.audio_active();
+        let ready = |link: &Link| link.session.audio_ready();
+        if send_when_ready(&shared, live, ready, |link| link.session.send_audio(timestamp, &pcm)) {
+            frames += packet as u64;
+        } else if !is_audio_live(&shared, epoch) {
             break;
         }
         let due = started + Duration::from_micros(timestamp);
         std::thread::sleep(due.saturating_duration_since(Instant::now()));
+    }
+    if active {
+        set_audio_focus(&shared, epoch, false);
     }
 }
 
@@ -168,7 +210,7 @@ fn music(player: Player, listeners: Receiver<Listener>, app: Arc<Mutex<App>>) {
     player.scan(Path::new(card::ROOT));
     log::info!("card: {} tracks", player.tracks().len());
     let mut source = player.source();
-    listeners.into_iter().for_each(|listener| play(listener, &mut source));
+    listeners.into_iter().for_each(|listener| play(listener, &player, &mut source));
 }
 
 /// act on session events. returns false when the headunit asked to shut down.
@@ -187,11 +229,14 @@ fn handle(shared: &Shared, host: &mut Host, event: Event) -> bool {
             std::thread::spawn(move || stream(shared, epoch, mode, app).unwrap_or_else(|e| log::error!("{e}")));
         }
         Event::VideoStopped => host.video_epoch += 1,
-        Event::AudioStarted(format) => {
-            log::info!("audio started {}hz {} bit {} channels", format.rate, format.bits, format.channels);
+        Event::AudioReady(format) => {
+            host.audio_epoch += 1;
             drop(host.stage.listeners.send((shared.clone(), host.audio_epoch, format)));
         }
-        Event::AudioStopped => host.audio_epoch += 1,
+        Event::AudioStarted(format) => {
+            log::info!("audio started {}hz {} bit {} channels", format.rate, format.bits, format.channels);
+        }
+        Event::AudioStopped => log::info!("audio stopped"),
         Event::Input(input) => apply(text::input_lines(&input)),
         Event::Unhandled { channel, id, body } => apply(vec![text::unknown_message(channel, id, &body)]),
         Event::UnknownField { channel, kind, field, value } => {

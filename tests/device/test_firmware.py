@@ -46,9 +46,10 @@ class FirmwareTest(test_device.DeviceTest):
         self.assertLess(statistics.median(trips), test_device.LATENCY_LIMIT)
 
     def listener(self):
-        """a car that has begun to get sound, silent or not, and pictures"""
+        """a car whose media audio channel is set up and receiving pictures"""
         headunit = self.connect(keycodes=(fakehu.HOME, fakehu.BACK, PLAY, PAUSE))
-        headunit.run_until(lambda: headunit.audio and headunit.frames, timeout=test_device.STREAM_TIMEOUT)
+        headunit.run_until(lambda: headunit.received(fakehu.MEDIA_AUDIO_CHANNEL, fakehu.SETUP_REQUEST)
+                           and headunit.frames, timeout=test_device.STREAM_TIMEOUT)
         return headunit
 
     def assert_plays(self, headunit):
